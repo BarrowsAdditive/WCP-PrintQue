@@ -5,13 +5,13 @@ Violentmonkey userscript for the Barrows OS [Work Centre Planning Board](https:/
 ## Install (auto-updates)
 
 1. Install [Violentmonkey](https://violentmonkey.github.io/) (Tampermonkey works too).
-2. Open this URL — Violentmonkey will offer to install it:
+2. In Violentmonkey: **+** → **Install from URL**, then paste **only** this link (not the GitHub repo page):
 
-   **https://raw.githubusercontent.com/BarrowsAdditive/WCP-PrintQue/main/userscript/bos-print-queue.user.js**
+   **https://cdn.jsdelivr.net/gh/BarrowsAdditive/WCP-PrintQue@main/userscript/bos-print-queue.user.js**
 
-3. Confirm **Install**. After that, Violentmonkey checks GitHub for a newer `@version` and updates on its own.
+3. Confirm **Install**. After that, Violentmonkey checks `@updateURL` for a newer `@version` and updates on its own.
 
-To reinstall later, use the same URL. Do not paste the file by hand if you want auto-update.
+If you see “Invalid script” with HTML in the error, the URL was wrong (e.g. `github.com/.../WCP-PrintQue` without `cdn.jsdelivr.net` or `raw.githubusercontent.com`). Use the jsDelivr link above.
 
 ## How updates work
 

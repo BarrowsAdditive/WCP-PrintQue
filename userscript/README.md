@@ -7,11 +7,11 @@ It adds a floating queue on top of the Additive Manufacturing tab (and any other
 ## Install
 
 1. Install [Violentmonkey](https://violentmonkey.github.io/) in Chrome or Edge. Tampermonkey can load the same file.
-2. Open this URL so it can auto-update from GitHub:
+2. Violentmonkey → **Install from URL** → paste:
 
-   https://raw.githubusercontent.com/BarrowsAdditive/WCP-PrintQue/main/userscript/bos-print-queue.user.js
+   https://cdn.jsdelivr.net/gh/BarrowsAdditive/WCP-PrintQue@main/userscript/bos-print-queue.user.js
 
-   Confirm **Install**. Violentmonkey will check `@updateURL` for a newer `@version` after that. To ship a change, bump `@version` in both `bos-print-queue.user.js` and `bos-print-queue.meta.js`, then push to `main`.
+   Confirm **Install**. Do not use the GitHub repo homepage URL — that returns HTML and fails. To ship a change, bump `@version` in both `bos-print-queue.user.js` and `bos-print-queue.meta.js`, then push to `main`.
 3. Open the planning board and select **Additive Manufacturing**. The **Print queue** panel sits on the right. The **Complete** group on the board is collapsed once on first load.
 4. Open **Farm settings** and set the real printer count. Until you do, it assumes 6 printers running 20 hours a day. That assumption is what decides which jobs show as missing.
 5. Alt+Q collapses the panel. The **⇥** button docks it full-height to the right of the window (WCP shifts left). **Gap from board** in Farm settings is the space between the docked panel and the board; drag the left edge of a docked panel to change its width. Undock with **⇤**, or drag the header when floating. Size and position are remembered.

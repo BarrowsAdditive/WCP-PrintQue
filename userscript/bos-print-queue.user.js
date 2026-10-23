@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.0
+// @version      1.3.1
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       Barrows Additive
 // @license      MIT
@@ -10,8 +10,9 @@
 // @match        https://os.barrowsglobal.com/*
 // @run-at       document-start
 // @grant        none
-// @downloadURL  https://raw.githubusercontent.com/BarrowsAdditive/WCP-PrintQue/main/userscript/bos-print-queue.user.js
-// @updateURL    https://raw.githubusercontent.com/BarrowsAdditive/WCP-PrintQue/main/userscript/bos-print-queue.meta.js
+// @installURL   https://cdn.jsdelivr.net/gh/BarrowsAdditive/WCP-PrintQue@main/userscript/bos-print-queue.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/BarrowsAdditive/WCP-PrintQue@main/userscript/bos-print-queue.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/BarrowsAdditive/WCP-PrintQue@main/userscript/bos-print-queue.meta.js
 // ==/UserScript==
 (function () {
   "use strict";
