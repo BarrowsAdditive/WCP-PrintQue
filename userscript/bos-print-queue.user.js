@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.6
+// @version      1.3.7
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       Barrows Additive
 // @license      MIT
@@ -446,6 +446,10 @@
 
     for (const job of prepared) {
       const load = farmLoad(job);
+      if (load.fullyOut && load.barQty > 0 && load.outQty > 0) {
+        active.push(decorate(job, settings, now));
+        continue;
+      }
       if (load.fullyOut) {
         const offFarm = {
           ...job,
@@ -705,9 +709,14 @@
   }
 
   function applyOutsourceFlags(job) {
-    const rec = outsourceMarks[outsourceJobKey(job)] || outsourceMarks[job.id] || {};
-    job.outsourcedJob = !!rec.job;
+    const key = outsourceJobKey(job);
+    const rec = outsourceMarks[key] || outsourceMarks[job.id] || {};
+    job.outsourcedJob = !!rec.job && !job.barredJob;
     (job.parts || []).forEach((part) => {
+      if (part.barred) {
+        part.outsourced = false;
+        return;
+      }
       part.outsourced = !!(rec.job || (rec.parts && rec.parts[partKey(part.name)]));
     });
     return job;
@@ -745,6 +754,7 @@
     job.barredJob = !!rec.job;
     (job.parts || []).forEach((part) => {
       part.barred = !!(rec.job || (rec.parts && rec.parts[partKey(part.name)]));
+      if (part.barred) part.outsourced = false;
     });
     return job;
   }
@@ -1098,8 +1108,8 @@
         workcenters: [...new Set(parts.map((part) => part.workcenter).filter(Boolean))],
       });
       job.id = id;
-      applyOutsourceFlags(job);
       applyBarFlags(job);
+      applyOutsourceFlags(job);
       const house = inHouseOpen(job);
       job.partMachineSeconds = house.reduce((sum, part) => sum + part.left * (part.runtimeSec || 0), 0);
       job.longestPartHours = house.reduce((max, part) => Math.max(max, (part.runtimeSec || 0) / 3600), 0);
@@ -1130,10 +1140,10 @@
 
   function jobHasOs(job) {
     if (!job) return false;
-    if (job.band === "outsourced" || job.outsourcedJob || job.fullyOut) return true;
     if ((job.outQty || 0) > 0) return true;
-    if ((job.partQueue || []).some((part) => part.outsourced)) return true;
-    return (job.parts || []).some((part) => part.outsourced && part.left > 0);
+    if (job.outsourcedJob || job.band === "outsourced") return true;
+    if ((job.partQueue || []).some((part) => part.outsourced && !part.barred)) return true;
+    return (job.parts || []).some((part) => part.outsourced && !part.barred && part.left > 0);
   }
 
   function jobsWithOs(plan) {
@@ -1150,7 +1160,6 @@
     (plan.blind || []).forEach(add);
     (plan.held || []).forEach(add);
     (plan.nodate || []).forEach(add);
-    (plan.barred || []).forEach(add);
     return list;
   }
 
@@ -1176,7 +1185,6 @@
     (plan.blind || []).forEach(add);
     (plan.held || []).forEach(add);
     (plan.nodate || []).forEach(add);
-    (plan.outsourced || []).forEach(add);
     return list;
   }
 
