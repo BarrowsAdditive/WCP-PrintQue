@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.2
+// @version      1.3.3
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       Barrows Additive
 // @license      MIT
@@ -316,6 +316,117 @@
     return "ok";
   }
 
+  function startOfDay(ms) {
+    const date = new Date(ms);
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  }
+
+  function dayKey(ms) {
+    const date = new Date(ms);
+    return [date.getFullYear(), date.getMonth() + 1, date.getDate()].join("-");
+  }
+
+  function packCalJob(job) {
+    return {
+      id: job.id,
+      name: job.name,
+      band: job.band,
+      machineHours: job.machineHours || 0,
+    };
+  }
+
+  function calendarHeadline(days) {
+    const hot = days.filter((day) => day.band === "late" || day.band === "tight");
+    if (!hot.length) return "Dates hold over the next 4 weeks";
+    const first = hot[0];
+    let stretchEnd = first;
+    for (let i = 0; i < days.length; i++) {
+      if (days[i].key !== first.key) continue;
+      stretchEnd = days[i];
+      for (let j = i + 1; j < days.length; j++) {
+        if (days[j].band === "late" || days[j].band === "tight") stretchEnd = days[j];
+        else break;
+      }
+      break;
+    }
+    const label = first.band === "late" ? "Miss" : "Tight";
+    const range = first.key === stretchEnd.key
+      ? formatDay(new Date(first.ms))
+      : `${formatDay(new Date(first.ms))}–${formatDay(new Date(stretchEnd.ms))}`;
+    const after = days.find((day) => day.ms > stretchEnd.ms && day.band === "ok" && day.capacity > 0);
+    if (!after) return `${label} ${range}`;
+    return `${label} ${range} · easier after ${formatDay(new Date(after.ms))}`;
+  }
+
+  function buildFarmCalendar(lists, settings, now) {
+    const origin = startOfDay(now);
+    const daily = Math.max(0.25, settings.machines * settings.hoursPerDay);
+    const demandByDay = new Map();
+    const jobsByDay = new Map();
+    const addHours = (job) => {
+      if (!job || !job.needBy) return;
+      const key = dayKey(job.needBy.getTime());
+      demandByDay.set(key, (demandByDay.get(key) || 0) + (job.machineHours || 0));
+    };
+    const addTick = (job) => {
+      if (!job || !job.needBy) return;
+      const key = dayKey(job.needBy.getTime());
+      if (!jobsByDay.has(key)) jobsByDay.set(key, []);
+      jobsByDay.get(key).push(packCalJob(job));
+    };
+    (lists.printed || []).concat(lists.parked || []).forEach((job) => {
+      addHours(job);
+      addTick(job);
+    });
+    (lists.blind || []).concat(lists.held || []).forEach(addTick);
+    const days = [];
+    let cumDemand = 0;
+    let cumCap = 0;
+    for (let i = 0; i < 28; i++) {
+      const ms = origin + i * 86400000;
+      const key = dayKey(ms);
+      const date = new Date(ms);
+      const weekend = date.getDay() === 0 || date.getDay() === 6;
+      const capacity = (!settings.weekends && weekend) ? 0 : daily;
+      const dayDemand = demandByDay.get(key) || 0;
+      cumDemand += dayDemand;
+      cumCap += capacity;
+      const util = cumCap > 0 ? cumDemand / cumCap : (cumDemand > 0 ? 2 : 0);
+      const band = util >= 1 ? "late" : util >= 0.85 ? "tight" : "ok";
+      const jobs = (jobsByDay.get(key) || []).slice().sort((a, b) => {
+        const rank = { late: 0, parked: 1, tight: 2, blind: 3, held: 4, ok: 5 };
+        return (rank[a.band] ?? 9) - (rank[b.band] ?? 9) || b.machineHours - a.machineHours;
+      });
+      const dots = [];
+      if (jobs.some((job) => job.band === "late")) dots.push("late");
+      if (jobs.some((job) => job.band === "tight")) dots.push("tight");
+      if (jobs.some((job) => job.band === "parked")) dots.push("parked");
+      if (jobs.some((job) => job.band === "blind")) dots.push("blind");
+      days.push({
+        key,
+        ms,
+        date: date.getDate(),
+        weekday: date.getDay(),
+        weekend,
+        off: capacity <= 0,
+        today: i === 0,
+        demand: dayDemand,
+        capacity,
+        cumDemand,
+        cumCap,
+        util,
+        band,
+        jobs,
+        dots,
+      });
+    }
+    return {
+      days,
+      headline: calendarHeadline(days),
+      caption: "Due dates vs farm hours. Not a printer booking.",
+    };
+  }
+
   function buildPlan(rawJobs, settings, nowMs) {
     const now = nowMs == null ? Date.now() : nowMs;
     const bufferMs = settings.bufferDays * 86400000;
@@ -464,6 +575,7 @@
       heroKind,
       machineHours: considered.reduce((sum, j) => sum + j.machineHours, 0),
       partsLeft: prepared.reduce((sum, j) => sum + (j.partsLeft || 0), 0),
+      calendar: buildFarmCalendar({ printed, parked, blind, held }, settings, now),
     };
   }
 
@@ -548,6 +660,7 @@
   let scanning = false;
   let currentPlan = null;
   let lens = "all";
+  let calendarDayKey = "";
   let lastFingerprint = "";
   let listScrollReset = false;
   let completeCollapsedOnce = false;
@@ -1542,6 +1655,7 @@
       '    <span data-band="outsourced"><i></i>OS</span>',
       '    <span data-band="barred"><i></i>Bar</span>',
       "  </div>",
+      '  <div class="bosq-cal" data-slot="calendar"></div>',
       '  <p class="bosq-sensitivity" data-slot="sense"></p>',
       '  <div class="bosq-tools">',
       '    <select data-slot="strategy" aria-label="Queue strategy"></select>',
@@ -1890,6 +2004,8 @@
 
     root.querySelector("[data-slot=hero]").innerHTML = heroHtml(shown);
     root.querySelector("[data-slot=stats]").innerHTML = statsHtml(plan);
+    const calSlot = ensureCalendarSlot();
+    if (calSlot) calSlot.innerHTML = calendarHtml(plan);
     root.querySelector("[data-slot=sense]").textContent = sensitivity(plan, jobs);
 
     const fingerprint = fingerprintOf(plan);
@@ -1938,6 +2054,49 @@
     return chips.map(([key, count, label]) =>
       `<button type="button" class="bosq-stat" data-lens="${key}"><b>${count}</b><span>${label}</span></button>`
     ).join("");
+  }
+
+  function ensureCalendarSlot() {
+    if (!ui || !ui.root) return null;
+    let slot = ui.root.querySelector("[data-slot=calendar]");
+    if (slot) return slot;
+    slot = document.createElement("div");
+    slot.className = "bosq-cal";
+    slot.setAttribute("data-slot", "calendar");
+    const legend = ui.root.querySelector(".bosq-legend");
+    if (legend) legend.after(slot);
+    else {
+      const body = ui.root.querySelector(".bosq-body");
+      if (body) body.insertBefore(slot, body.firstChild);
+    }
+    return slot;
+  }
+
+  function calendarHtml(plan) {
+    const cal = plan.calendar;
+    if (!cal || !cal.days || !cal.days.length) return "";
+    const cells = cal.days.map((day) => {
+      const on = calendarDayKey === day.key;
+      const title = [
+        formatDay(new Date(day.ms)),
+        day.off ? "farm off" : `${Math.round(day.util * 100)}% of capacity by this date`,
+        day.jobs.length ? `${day.jobs.length} due` : "nothing due",
+      ].join(" · ");
+      const dots = day.dots.map((band) => `<i data-dot="${esc(band)}"></i>`).join("");
+      return `<button type="button" class="bosq-cal-day${on ? " is-on" : ""}${day.today ? " is-today" : ""}${day.off ? " is-off" : ""}" data-cal-day="${esc(day.key)}" data-band="${esc(day.band)}" style="--u:${Math.min(1.2, day.util) / 1.2}" title="${esc(title)}" aria-pressed="${on ? "true" : "false"}" aria-label="${esc(title)}"><span>${day.date}</span><span class="bosq-cal-dots">${dots}</span></button>`;
+    }).join("");
+    const selected = cal.days.find((day) => day.key === calendarDayKey);
+    let sheet = "";
+    if (selected) {
+      const shown = selected.jobs.slice(0, 6);
+      const extra = selected.jobs.length - shown.length;
+      const utilPct = selected.cumCap > 0 ? Math.round(selected.util * 100) + "%" : "—";
+      const rows = shown.map((job) =>
+        `<button type="button" class="bosq-cal-job" data-cal-open="${esc(job.id)}" data-band="${esc(job.band)}"><span>${esc(job.name)}</span><span>${job.machineHours > 0 ? esc(formatClock(job.machineHours * 3600)) : esc(labelFor(job.band))}</span></button>`
+      ).join("");
+      sheet = `<div class="bosq-cal-sheet"><p>${esc(formatDay(new Date(selected.ms)))} · ${esc(utilPct)} by this date${selected.jobs.length ? " · " + selected.jobs.length + " due" : ""}</p>${rows || "<p>Nothing due this day.</p>"}${extra > 0 ? `<p>+${extra} more</p>` : ""}</div>`;
+    }
+    return `<div class="bosq-cal-head">${esc(cal.headline)}</div><div class="bosq-cal-grid" role="grid" aria-label="Farm calendar">${cells}</div>${sheet}<p class="bosq-cal-cap">${esc(cal.caption)}</p>`;
   }
 
   function sensitivity(plan, jobs) {
@@ -2114,6 +2273,23 @@
   }
 
   function onPanelClick(event) {
+    const calOpen = event.target.closest("[data-cal-open]");
+    if (calOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      const job = jobsById.get(calOpen.getAttribute("data-cal-open"));
+      if (job) focusJobFromQueue(job, { expandTicket: false });
+      return;
+    }
+    const calDay = event.target.closest("[data-cal-day]");
+    if (calDay) {
+      event.preventDefault();
+      const key = calDay.getAttribute("data-cal-day");
+      calendarDayKey = calendarDayKey === key ? "" : key;
+      const slot = ensureCalendarSlot();
+      if (slot && currentPlan) slot.innerHTML = calendarHtml(currentPlan);
+      return;
+    }
     const lensButton = event.target.closest("[data-lens]");
     if (lensButton) {
       const next = lensButton.getAttribute("data-lens");
@@ -2408,6 +2584,44 @@
     .bosq-legend [data-band="blind"] i { background: #8b5cf6; }
     .bosq-legend [data-band="outsourced"] i { background: #ec4899; }
     .bosq-legend [data-band="barred"] i { background: #78716c; }
+    .bosq-cal { margin: 0 0 8px; }
+    .bosq-cal-head { color: #f3f0ea; font-size: 11px; font-weight: 650; margin: 0 0 6px; }
+    .bosq-cal-grid {
+      display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px;
+    }
+    .bosq-cal-day {
+      display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+      min-height: 36px; padding: 4px 0 3px; border-radius: 7px; cursor: pointer;
+      border: 1px solid transparent; background: #201d19; color: #e8e6e1;
+      font: inherit; font-size: 10px; font-variant-numeric: tabular-nums;
+    }
+    .bosq-cal-day[data-band="ok"] { background: rgba(132, 204, 22, calc(0.06 + var(--u, 0) * 0.16)); }
+    .bosq-cal-day[data-band="tight"] { background: rgba(249, 115, 22, calc(0.1 + var(--u, 0) * 0.18)); }
+    .bosq-cal-day[data-band="late"] { background: rgba(239, 68, 68, calc(0.12 + var(--u, 0) * 0.2)); }
+    .bosq-cal-day.is-off { opacity: .42; }
+    .bosq-cal-day.is-today { outline: 1px solid #e7b15a; outline-offset: -1px; }
+    .bosq-cal-day.is-on { border-color: rgba(231,177,90,.7); }
+    .bosq-cal-dots { display: flex; gap: 2px; min-height: 5px; }
+    .bosq-cal-dots i { width: 4px; height: 4px; border-radius: 99px; background: #6f6a62; }
+    .bosq-cal-dots [data-dot="late"] { background: #ef4444; }
+    .bosq-cal-dots [data-dot="tight"] { background: #f97316; }
+    .bosq-cal-dots [data-dot="parked"] { background: #64748b; }
+    .bosq-cal-dots [data-dot="blind"] { background: #8b5cf6; }
+    .bosq-cal-cap { margin: 5px 0 0; color: #8f8a82; font-size: 10px; }
+    .bosq-cal-sheet { margin-top: 6px; padding: 6px 8px; border-radius: 8px; background: #1a1815; }
+    .bosq-cal-sheet p { margin: 0 0 5px; color: #a39e94; font-size: 10px; }
+    .bosq-cal-job {
+      display: flex; justify-content: space-between; gap: 8px; width: 100%;
+      margin: 0 0 3px; padding: 4px 6px; border-radius: 6px; cursor: pointer; text-align: left;
+      border: 0; background: #201d19; color: inherit; font: inherit; font-size: 11px;
+      box-shadow: inset 2px 0 0 #6f6a62;
+    }
+    .bosq-cal-job[data-band="late"] { box-shadow: inset 2px 0 0 #ef4444; }
+    .bosq-cal-job[data-band="tight"] { box-shadow: inset 2px 0 0 #f97316; }
+    .bosq-cal-job[data-band="blind"] { box-shadow: inset 2px 0 0 #8b5cf6; }
+    .bosq-cal-job[data-band="parked"] { box-shadow: inset 2px 0 0 #64748b; }
+    .bosq-cal-job[data-band="held"] { box-shadow: inset 2px 0 0 #8a847b; }
+    .bosq-cal-job span:last-child { color: #a39e94; flex-shrink: 0; }
     .bosq-sensitivity { min-height: 14px; margin: 0 0 6px; color: #a39e94; font-size: 10px; }
     .bosq-tools { display: grid; grid-template-columns: 1fr; gap: 5px; }
     .bosq-board-acts { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 5px; }

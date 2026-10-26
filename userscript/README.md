@@ -46,6 +46,8 @@ Click a card to jump to that row (it lands in the upper third of the board, not 
 
 Miss, Tight, Blind, and OS at the top of the panel filter the list and jump the list back to the top. The colour chips under those counts are the same tints used on the board.
 
+The **farm calendar** (4 weeks from today) shows cumulative in-house hours due by each date versus farm capacity — red miss, orange tight, green easier. Dots mark miss / tight / parked / blind due that day. Click a day for the jobs due then; click a name to jump to the board. This is due dates vs printer-hours, not a booking of named printers. Blind jobs do not heat a day until they have a runtime.
+
 Each workticket row gets a light tint on the board: **red** miss, **orange** tight, **purple** blind, **pink** outsourced, slate parked/held, soft green when it has spare time. Expanded part rows get the same tints. The panel cards use the same colours.
 
 **Copy handover** puts the current order on the clipboard, including the part order under each job.

@@ -1,6 +1,6 @@
 # WCP Print Queue
 
-Violentmonkey userscript for the Barrows OS [Work Centre Planning Board](https://os.barrowsglobal.com/work-centre-planning-board). Farm-aware print queue, miss/tight/blind flags, and local outsource marks. It only reads the board — it never writes dates, runtimes, or planning status.
+Violentmonkey userscript for the Barrows OS [Work Centre Planning Board](https://os.barrowsglobal.com/work-centre-planning-board). Farm-aware print queue, miss/tight/blind flags, a 4-week capacity calendar, and local outsource/barred marks. It only reads the board — it never writes dates, runtimes, or planning status.
 
 ## Install (auto-updates)
 
