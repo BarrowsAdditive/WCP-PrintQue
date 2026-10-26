@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.1
+// @version      1.3.2
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       Barrows Additive
 // @license      MIT
@@ -21,6 +21,7 @@
 
   const STORAGE_KEY = "bosq-settings-v1";
   const OUTSOURCE_KEY = "bosq-outsourced-v1";
+  const BARRED_KEY = "bosq-barred-v1";
 
   /* BOSQ_PURE_START */
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
@@ -176,7 +177,7 @@
   }
 
   function inHouseOpen(job) {
-    return (job.parts || []).filter((part) => part.left > 0 && !part.outsourced);
+    return (job.parts || []).filter((part) => part.left > 0 && !part.outsourced && !part.barred);
   }
 
   function farmLoad(job) {
@@ -187,11 +188,12 @@
     const unrated = house.filter((part) => !(part.runtimeSec > 0)).length;
     const openAll = (job.parts || []).filter((part) => part.left > 0);
     const outQty = openAll.filter((part) => part.outsourced).reduce((sum, part) => sum + part.left, 0);
-    if (job.outsourcedJob || (openAll.length > 0 && house.length === 0)) {
-      return { seconds: 0, qty: 0, longest: 0, unrated: 0, outQty, fullyOut: true, hasParts: openAll.length > 0 };
+    const barQty = openAll.filter((part) => part.barred).reduce((sum, part) => sum + part.left, 0);
+    if (job.outsourcedJob || job.barredJob || (openAll.length > 0 && house.length === 0)) {
+      return { seconds: 0, qty: 0, longest: 0, unrated: 0, outQty, barQty, fullyOut: true, hasParts: openAll.length > 0 };
     }
     if (house.length) {
-      return { seconds: fromParts, qty, longest, unrated, outQty, fullyOut: false, hasParts: true };
+      return { seconds: fromParts, qty, longest, unrated, outQty, barQty, fullyOut: false, hasParts: true };
     }
     const seconds = job.boardSeconds > 0 ? job.boardSeconds : job.partMachineSeconds || 0;
     return {
@@ -200,9 +202,18 @@
       longest: job.longestPartHours || 0,
       unrated: job.unratedParts || 0,
       outQty: 0,
+      barQty: 0,
       fullyOut: false,
       hasParts: false,
     };
+  }
+
+  function fullyOutBucket(job, load) {
+    if (job.barredJob) return "barred";
+    if (job.outsourcedJob) return "outsourced";
+    if (load.barQty > 0 && load.outQty === 0) return "barred";
+    if (load.outQty > 0) return "outsourced";
+    return "barred";
   }
 
   function decorate(job, settings, now) {
@@ -223,6 +234,7 @@
       farmQty: load.qty,
       unratedParts: load.unrated,
       outQty: load.outQty,
+      barQty: load.barQty,
       fullyOut: load.fullyOut,
       longestPartHours: load.longest,
     };
@@ -232,7 +244,7 @@
     const start = job.start || now;
     const open = (job.parts || []).filter((part) => part.left > 0);
     const houseHours = open
-      .filter((part) => !part.outsourced && part.runtimeSec > 0)
+      .filter((part) => !part.outsourced && !part.barred && part.runtimeSec > 0)
       .reduce((sum, part) => sum + (part.left * part.runtimeSec / 3600) * (1 + settings.scrap), 0);
     const scored = open.map((part) => {
       const hours = (part.left * (part.runtimeSec || 0) / 3600) * (1 + settings.scrap);
@@ -242,13 +254,14 @@
       const slack = job.needBy ? (job.needBy.getTime() - finish) / 86400000 : null;
       const share = houseHours > 0 && hours > 0 ? hours / houseHours : 0;
       let band = "ok";
-      if (part.outsourced) band = "outsourced";
+      if (part.barred) band = "barred";
+      else if (part.outsourced) band = "outsourced";
       else if (!(part.runtimeSec > 0)) band = "blind";
       else if (slack != null && slack < -0.02) band = "late";
       else if (slack != null && slack < settings.tightDays) band = "tight";
       return { ...part, hours, serialHours, capDays, slack, share, band, first: false, order: null };
     });
-    const rank = { blind: 0, late: 1, tight: 2, ok: 3, outsourced: 4 };
+    const rank = { blind: 0, late: 1, tight: 2, ok: 3, outsourced: 4, barred: 4 };
     scored.sort((a, b) => {
       const d = (rank[a.band] ?? 9) - (rank[b.band] ?? 9);
       if (d) return d;
@@ -256,7 +269,7 @@
     });
     let n = 0;
     scored.forEach((part) => {
-      if (part.band === "outsourced" || part.band === "blind") return;
+      if (part.band === "outsourced" || part.band === "barred" || part.band === "blind") return;
       part.order = ++n;
       if (n === 1) part.first = true;
     });
@@ -270,6 +283,7 @@
     const late = queue.filter((part) => part.band === "late").length;
     const tight = queue.filter((part) => part.band === "tight").length;
     const out = queue.filter((part) => part.band === "outsourced").length;
+    const barred = queue.filter((part) => part.band === "barred").length;
     const bits = [];
     if (first) bits.push(`Print first: ${first.name}`);
     else if (blind) bits.push("Set a runtime on the open SKUs");
@@ -277,6 +291,7 @@
     if (tight) bits.push(`${tight} tight`);
     if (blind) bits.push(`${blind} blind`);
     if (out) bits.push(`${out} OS`);
+    if (barred) bits.push(`${barred} bar`);
     return bits.join(" · ");
   }
 
@@ -284,7 +299,7 @@
     const partQueue = rankParts(job, settings, now);
     const materials = new Map();
     partQueue.forEach((part) => {
-      if (part.outsourced || !part.family || !(part.hours > 0)) return;
+      if (part.outsourced || part.barred || !part.family || !(part.hours > 0)) return;
       materials.set(part.family, (materials.get(part.family) || 0) + part.hours);
     });
     return {
@@ -315,12 +330,28 @@
     let held = [];
     const nodate = [];
     const outsourced = [];
+    const barred = [];
     const active = [];
 
     for (const job of prepared) {
       const load = farmLoad(job);
       if (load.fullyOut) {
-        outsourced.push(attachParts({ ...job, band: "outsourced", machineHours: 0, capacityDays: 0, usedSeconds: 0, farmQty: 0, outQty: load.outQty, fullyOut: true }, settings, now));
+        const offFarm = {
+          ...job,
+          machineHours: 0,
+          capacityDays: 0,
+          usedSeconds: 0,
+          farmQty: 0,
+          outQty: load.outQty,
+          barQty: load.barQty,
+          fullyOut: true,
+        };
+        const bucket = fullyOutBucket(job, load);
+        if (bucket === "barred") {
+          barred.push(attachParts({ ...offFarm, band: "barred" }, settings, now));
+        } else {
+          outsourced.push(attachParts({ ...offFarm, band: "outsourced" }, settings, now));
+        }
         continue;
       }
       if (job.partsLeft == null && !load.hasParts) {
@@ -354,6 +385,7 @@
     held.sort((a, b) => (a.needBy || 0) - (b.needBy || 0));
     nodate.sort((a, b) => String(a.name).localeCompare(String(b.name)));
     outsourced.sort((a, b) => (a.needBy || 0) - (b.needBy || 0) || String(a.name).localeCompare(String(b.name)));
+    barred.sort((a, b) => (a.needBy || 0) - (b.needBy || 0) || String(a.name).localeCompare(String(b.name)));
 
     let printed;
     let parked;
@@ -422,6 +454,7 @@
       held,
       nodate,
       outsourced,
+      barred,
       done,
       late,
       tight,
@@ -522,6 +555,7 @@
   const jobsById = new Map();
   const expandedIds = new Set();
   let outsourceMarks = loadOutsource();
+  let barredMarks = loadBarred();
   let boardBulk = false;
   let rowBeaconEl = null;
   let rowBeaconTimer = null;
@@ -565,11 +599,76 @@
     return job;
   }
 
+  function loadBarred() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(BARRED_KEY) || "{}");
+      return saved && typeof saved === "object" ? saved : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveBarred() {
+    localStorage.setItem(BARRED_KEY, JSON.stringify(barredMarks));
+  }
+
+  function barredRec(jobId) {
+    if (!barredMarks[jobId]) barredMarks[jobId] = { job: false, parts: {} };
+    return barredMarks[jobId];
+  }
+
+  function pruneBarred(jobId) {
+    const rec = barredMarks[jobId];
+    if (!rec) return;
+    const parts = rec.parts || {};
+    const anyPart = Object.keys(parts).some((key) => parts[key]);
+    if (!rec.job && !anyPart) delete barredMarks[jobId];
+  }
+
+  function applyBarFlags(job) {
+    const key = outsourceJobKey(job);
+    const rec = barredMarks[key] || barredMarks[job.id] || {};
+    job.barredJob = !!rec.job;
+    (job.parts || []).forEach((part) => {
+      part.barred = !!(rec.job || (rec.parts && rec.parts[partKey(part.name)]));
+    });
+    return job;
+  }
+
+  function clearOutsourceForJob(key) {
+    delete outsourceMarks[key];
+    saveOutsource();
+  }
+
+  function clearBarredForJob(key) {
+    delete barredMarks[key];
+    saveBarred();
+  }
+
+  function clearPartOutsource(key, skuKey) {
+    const rec = outsourceMarks[key];
+    if (!rec || !rec.parts) return;
+    delete rec.parts[skuKey];
+    pruneOutsource(key);
+    saveOutsource();
+  }
+
+  function clearPartBarred(key, skuKey) {
+    const rec = barredMarks[key];
+    if (!rec || !rec.parts) return;
+    delete rec.parts[skuKey];
+    pruneBarred(key);
+    saveBarred();
+  }
+
   function toggleJobOutsource(job) {
     const key = outsourceJobKey(job);
     const rec = outsourceRec(key);
     rec.job = !rec.job;
-    if (rec.job) rec.parts = {};
+    if (rec.job) {
+      rec.parts = {};
+      clearBarredForJob(key);
+    }
     pruneOutsource(key);
     saveOutsource();
   }
@@ -588,7 +687,10 @@
     } else {
       rec.parts = rec.parts || {};
       if (rec.parts[skuKey]) delete rec.parts[skuKey];
-      else rec.parts[skuKey] = true;
+      else {
+        rec.parts[skuKey] = true;
+        clearPartBarred(jobKey, skuKey);
+      }
       const marked = openNames.filter((name) => rec.parts[partKey(name)]);
       if (openNames.length && marked.length === openNames.length) {
         rec.job = true;
@@ -597,6 +699,47 @@
     }
     pruneOutsource(jobKey);
     saveOutsource();
+  }
+
+  function toggleJobBarred(job) {
+    const key = outsourceJobKey(job);
+    const rec = barredRec(key);
+    rec.job = !rec.job;
+    if (rec.job) {
+      rec.parts = {};
+      clearOutsourceForJob(key);
+    }
+    pruneBarred(key);
+    saveBarred();
+  }
+
+  function togglePartBarred(job, partName) {
+    const jobKey = outsourceJobKey(job);
+    const rec = barredRec(jobKey);
+    const skuKey = partKey(partName);
+    const openNames = (job.parts || []).filter((part) => part.left > 0).map((part) => part.name);
+    if (rec.job) {
+      rec.job = false;
+      rec.parts = {};
+      openNames.forEach((name) => {
+        if (partKey(name) !== skuKey) rec.parts[partKey(name)] = true;
+      });
+    } else {
+      rec.parts = rec.parts || {};
+      if (rec.parts[skuKey]) delete rec.parts[skuKey];
+      else {
+        rec.parts[skuKey] = true;
+        clearPartOutsource(jobKey, skuKey);
+      }
+      const marked = openNames.filter((name) => rec.parts[partKey(name)]);
+      if (openNames.length && marked.length === openNames.length) {
+        rec.job = true;
+        rec.parts = {};
+        clearOutsourceForJob(jobKey);
+      }
+    }
+    pruneBarred(jobKey);
+    saveBarred();
   }
 
   function onBoard() {
@@ -842,6 +985,7 @@
       });
       job.id = id;
       applyOutsourceFlags(job);
+      applyBarFlags(job);
       const house = inHouseOpen(job);
       job.partMachineSeconds = house.reduce((sum, part) => sum + part.left * (part.runtimeSec || 0), 0);
       job.longestPartHours = house.reduce((max, part) => Math.max(max, (part.runtimeSec || 0) / 3600), 0);
@@ -892,6 +1036,33 @@
     (plan.blind || []).forEach(add);
     (plan.held || []).forEach(add);
     (plan.nodate || []).forEach(add);
+    (plan.barred || []).forEach(add);
+    return list;
+  }
+
+  function jobHasBar(job) {
+    if (!job) return false;
+    if (job.band === "barred" || job.barredJob) return true;
+    if ((job.barQty || 0) > 0) return true;
+    if ((job.partQueue || []).some((part) => part.barred)) return true;
+    return (job.parts || []).some((part) => part.barred && part.left > 0);
+  }
+
+  function jobsWithBar(plan) {
+    const seen = new Set();
+    const list = [];
+    const add = (job) => {
+      if (!job || seen.has(job.id) || !jobHasBar(job)) return;
+      seen.add(job.id);
+      list.push(job);
+    };
+    (plan.barred || []).forEach(add);
+    (plan.printed || []).forEach(add);
+    (plan.parked || []).forEach(add);
+    (plan.blind || []).forEach(add);
+    (plan.held || []).forEach(add);
+    (plan.nodate || []).forEach(add);
+    (plan.outsourced || []).forEach(add);
     return list;
   }
 
@@ -901,6 +1072,7 @@
     if (lens === "tight") return job.band === "tight";
     if (lens === "blind") return job.band === "blind" || job.band === "nodate";
     if (lens === "outsourced") return jobHasOs(job);
+    if (lens === "barred") return jobHasBar(job);
     return true;
   }
 
@@ -1231,7 +1403,7 @@
 
   function applyInline(jobs, plan) {
     const byId = new Map();
-    plan.printed.concat(plan.parked, plan.blind, plan.held, plan.nodate, plan.outsourced || [], plan.done).forEach((job) => byId.set(job.id, job));
+    plan.printed.concat(plan.parked, plan.blind, plan.held, plan.nodate, plan.outsourced || [], plan.barred || [], plan.done).forEach((job) => byId.set(job.id, job));
     rowById.clear();
     document.querySelectorAll("tr[data-bosq-id]").forEach((row) => {
       if (!jobs.some((job) => job.row === row)) clearInline(row);
@@ -1290,13 +1462,13 @@
     const byName = new Map(queue.map((part) => [partKey(part.name), part]));
     (job.parts || []).forEach((part) => {
       if (!part.row) return;
-      if (!(part.left > 0) && !part.outsourced) {
+      if (!(part.left > 0) && !part.outsourced && !part.barred) {
         part.row.removeAttribute("data-bosq-part");
         part.row.removeAttribute("data-bosq-part-band");
         return;
       }
       const ranked = byName.get(partKey(part.name));
-      const band = ranked ? ranked.band : (part.outsourced ? "outsourced" : "");
+      const band = ranked ? ranked.band : (part.barred ? "barred" : (part.outsourced ? "outsourced" : ""));
       part.row.setAttribute("data-bosq-part", part.name);
       if (band) part.row.setAttribute("data-bosq-part-band", band);
       else part.row.removeAttribute("data-bosq-part-band");
@@ -1326,6 +1498,12 @@
       return {
         label: job.outQty ? `outsourced · ${job.outQty} pts` : "outsourced",
         detail: "Marked outsourced in the print queue. It is off the farm clock until you unmark it.",
+      };
+    }
+    if (job.band === "barred") {
+      return {
+        label: job.barQty ? `barred · ${job.barQty} pts` : "barred",
+        detail: "Marked barred here — cancelled, moulded elsewhere, or not needed. Off the farm clock until you unbar it.",
       };
     }
     const rank = job.order ? `#${job.order}` : "·";
@@ -1362,6 +1540,7 @@
       '    <span data-band="tight"><i></i>Tight</span>',
       '    <span data-band="blind"><i></i>Blind</span>',
       '    <span data-band="outsourced"><i></i>OS</span>',
+      '    <span data-band="barred"><i></i>Bar</span>',
       "  </div>",
       '  <p class="bosq-sensitivity" data-slot="sense"></p>',
       '  <div class="bosq-tools">',
@@ -1754,6 +1933,7 @@
       ["tight", plan.tight.length, "Tight"],
       ["blind", plan.blind.length + plan.nodate.length, "Blind"],
       ["outsourced", jobsWithOs(plan).length, "OS"],
+      ["barred", jobsWithBar(plan).length, "Bar"],
     ];
     return chips.map(([key, count, label]) =>
       `<button type="button" class="bosq-stat" data-lens="${key}"><b>${count}</b><span>${label}</span></button>`
@@ -1789,17 +1969,24 @@
       if (!jobs.length) return '<div class="bosq-empty">Nothing marked outsourced.</div>';
       return section("Outsourced", jobs, "Local marks · only OS SKUs");
     }
+    if (lens === "barred") {
+      const jobs = jobsWithBar(plan);
+      if (!jobs.length) return '<div class="bosq-empty">Nothing marked barred.</div>';
+      return section("Barred", jobs, "Not needed · only barred SKUs");
+    }
     const sections = [];
     const blind = plan.blind.concat(plan.nodate).filter(lensVisible);
     const parked = plan.parked.filter(lensVisible);
     const printed = plan.printed.filter(lensVisible);
     const held = plan.held.filter(lensVisible);
     const outsourced = (plan.outsourced || []).filter(lensVisible);
+    const barredJobs = (plan.barred || []).filter(lensVisible);
     if (blind.length) sections.push(section("No runtime", blind, "Open parts, 0m left"));
     if (parked.length) sections.push(section("Park", parked, "Would push other dates"));
     if (printed.length) sections.push(section("Print order", printed, strategyBlurb()));
     if (held.length) sections.push(section("Held", held, "Pre-production"));
     if (outsourced.length) sections.push(section("Outsourced", outsourced, "Local marks · off farm"));
+    if (barredJobs.length) sections.push(section("Barred", barredJobs, "Not needed · off farm"));
     if (!sections.length) {
       return `<div class="bosq-empty">${plan.allCount ? "Nothing in this view." : "Waiting for the board…"}</div>`;
     }
@@ -1820,28 +2007,34 @@
   function cardHtml(job) {
     const open = expandedIds.has(job.id);
     const rank = job.order ? `#${job.order}` : labelFor(job.band);
-    const qty = job.band === "outsourced" || lens === "outsourced"
+    const qty = lens === "outsourced" || job.band === "outsourced"
       ? (job.outQty ? `${job.outQty} OS` : "OS")
-      : (job.farmQty != null ? String(job.farmQty) : (job.partsLeft != null ? String(job.partsLeft) : ""));
+      : lens === "barred" || job.band === "barred"
+        ? (job.barQty ? `${job.barQty} bar` : "bar")
+        : (job.farmQty != null ? String(job.farmQty) : (job.partsLeft != null ? String(job.partsLeft) : ""));
     const slack = job.band === "blind" ? "no runtime"
       : job.band === "nodate" ? "no date"
       : job.band === "outsourced" ? "off farm"
+      : job.band === "barred" ? "barred"
       : job.band === "parked" ? formatSlack(job.aloneSlackDays)
       : formatSlack(job.queueSlackDays);
-    const farm = (job.band !== "outsourced" && job.capacityDays > 0) ? formatSpan(job.capacityDays) : "";
+    const farm = (job.band !== "outsourced" && job.band !== "barred" && job.capacityDays > 0) ? formatSpan(job.capacityDays) : "";
     const meta = [rank, formatDay(job.exFactory), qty, farm, slack].filter(Boolean).join(" · ");
     const cue = job.partCue ? job.partCue.replace(/^Print first:\s*/i, "→ ") : "";
     const osOn = !!job.outsourcedJob || job.band === "outsourced";
-    const cardBand = lens === "outsourced" ? "outsourced" : job.band;
+    const barOn = !!job.barredJob || job.band === "barred";
+    const cardBand = lens === "outsourced" ? "outsourced" : (lens === "barred" ? "barred" : job.band);
+    const hideCue = lens === "outsourced" || lens === "barred";
     return `<article class="bosq-card" data-band="${esc(cardBand)}" data-job="${esc(job.id)}">
       <div class="bosq-card-top">
         <button type="button" class="bosq-card-jump" data-open="${esc(job.id)}">
           <span class="bosq-card-name">${esc(job.name)}</span>
           <span class="bosq-card-meta">${esc(meta)}</span>
-          ${cue && lens !== "outsourced" ? `<span class="bosq-card-cue">${esc(cue)}</span>` : ""}
+          ${cue && !hideCue ? `<span class="bosq-card-cue">${esc(cue)}</span>` : ""}
         </button>
         <div class="bosq-card-acts">
-          <button type="button" class="bosq-os ${osOn ? "is-on" : ""}" data-os-job="${esc(job.id)}" title="${osOn ? "Unmark this job as outsourced" : "Mark this whole job as outsourced"}">OS</button>
+          <button type="button" class="bosq-os ${osOn ? "is-on" : ""}" data-os-job="${esc(job.id)}" title="${osOn ? "Unmark outsourced" : "Mark whole job outsourced"}">OS</button>
+          <button type="button" class="bosq-bar-btn ${barOn ? "is-on" : ""}" data-bar-job="${esc(job.id)}" title="${barOn ? "Unbar job" : "Bar whole job (ignore on farm)"}">BAR</button>
           <button type="button" class="bosq-more" data-expand="${esc(job.id)}" aria-expanded="${open ? "true" : "false"}" title="${open ? "Hide parts" : "Show which parts to print first"}">${open ? "–" : "+"}</button>
         </div>
       </div>
@@ -1852,11 +2045,18 @@
   function partsHtml(job) {
     let queue = job.partQueue || [];
     if (lens === "outsourced") queue = queue.filter((part) => part.outsourced);
+    if (lens === "barred") queue = queue.filter((part) => part.barred);
     if (!queue.length) {
-      return `<div class="bosq-parts"><p class="bosq-parts-empty">${lens === "outsourced" ? "No OS SKUs loaded yet. Expand the row on the board." : "Expand this job on the board to see SKUs."}</p></div>`;
+      const empty = lens === "outsourced"
+        ? "No OS SKUs loaded yet. Expand the row on the board."
+        : lens === "barred"
+          ? "No barred SKUs loaded yet. Expand the row on the board."
+          : "Expand this job on the board to see SKUs.";
+      return `<div class="bosq-parts"><p class="bosq-parts-empty">${empty}</p></div>`;
     }
     const rows = queue.map((part) => {
       const osOn = !!part.outsourced;
+      const barOn = !!part.barred;
       const tag = part.first ? "first" : part.band;
       const label = part.first
         ? `#${part.order}`
@@ -1867,14 +2067,19 @@
         ? `${part.left} · no runtime`
         : part.band === "outsourced"
           ? `${part.left} left`
-          : `${part.left} × ${formatClock(part.runtimeSec)} · ${formatClock(part.hours * 3600)} · ${formatSlack(part.slack)}`;
+          : part.band === "barred"
+            ? `${part.left} left`
+            : `${part.left} × ${formatClock(part.runtimeSec)} · ${formatClock(part.hours * 3600)} · ${formatSlack(part.slack)}`;
       return `<div class="bosq-part" data-band="${esc(part.band)}">
         <button type="button" class="bosq-part-body" data-part-jump="${esc(job.id)}" data-part-name="${esc(part.name)}">
           <span class="bosq-part-tag" data-tag="${esc(tag)}">${esc(label)}</span>
           <span class="bosq-part-name">${esc(part.name)}</span>
           <span class="bosq-part-clock">${esc(clock)}</span>
         </button>
-        <button type="button" class="bosq-os ${osOn ? "is-on" : ""}" data-os-part="${esc(part.name)}" data-os-job="${esc(job.id)}" title="${osOn ? "Print this SKU in-house" : "Mark this SKU as outsourced"}">OS</button>
+        <div class="bosq-part-acts">
+          <button type="button" class="bosq-os ${osOn ? "is-on" : ""}" data-os-part="${esc(part.name)}" data-os-job="${esc(job.id)}" title="${osOn ? "Print in-house" : "Outsource SKU"}">OS</button>
+          <button type="button" class="bosq-bar-btn ${barOn ? "is-on" : ""}" data-bar-part="${esc(part.name)}" data-bar-job="${esc(job.id)}" title="${barOn ? "Unbar SKU" : "Bar SKU (ignore)"}">BAR</button>
+        </div>
       </div>`;
     }).join("");
     return `<div class="bosq-parts">${rows}</div>`;
@@ -1888,6 +2093,7 @@
     if (band === "late") return "Miss";
     if (band === "tight") return "Tight";
     if (band === "outsourced") return "OS";
+    if (band === "barred") return "Bar";
     return "Ok";
   }
 
@@ -1904,7 +2110,7 @@
 
   function fingerprintOf(plan) {
     const pack = (job) => [job.id, job.band, job.order, Math.round((job.queueSlackDays || 0) * 10), job.partCue, job.outQty, expandedIds.has(job.id) ? 1 : 0].join(":");
-    return [plan.tab, lens, settings.dimOk, JSON.stringify(outsourceMarks), plan.printed.map(pack).join(","), plan.parked.map(pack).join(","), plan.blind.map(pack).join(","), plan.held.map(pack).join(","), (plan.outsourced || []).map(pack).join(","), jobsWithOs(plan).map(pack).join(",")].join("~");
+    return [plan.tab, lens, settings.dimOk, JSON.stringify(outsourceMarks), JSON.stringify(barredMarks), plan.printed.map(pack).join(","), plan.parked.map(pack).join(","), plan.blind.map(pack).join(","), plan.held.map(pack).join(","), (plan.outsourced || []).map(pack).join(","), (plan.barred || []).map(pack).join(","), jobsWithOs(plan).map(pack).join(","), jobsWithBar(plan).map(pack).join(",")].join("~");
   }
 
   function onPanelClick(event) {
@@ -1936,6 +2142,30 @@
       const job = jobsById.get(osJob.getAttribute("data-os-job"));
       if (job) {
         toggleJobOutsource(job);
+        lastFingerprint = "";
+        scan();
+      }
+      return;
+    }
+    const barPart = event.target.closest("button[data-bar-part]");
+    if (barPart) {
+      event.preventDefault();
+      event.stopPropagation();
+      const job = jobsById.get(barPart.getAttribute("data-bar-job"));
+      if (job) {
+        togglePartBarred(job, barPart.getAttribute("data-bar-part"));
+        lastFingerprint = "";
+        scan();
+      }
+      return;
+    }
+    const barJob = event.target.closest("button[data-bar-job]:not([data-bar-part])");
+    if (barJob) {
+      event.preventDefault();
+      event.stopPropagation();
+      const job = jobsById.get(barJob.getAttribute("data-bar-job"));
+      if (job) {
+        toggleJobBarred(job);
         lastFingerprint = "";
         scan();
       }
@@ -1998,6 +2228,11 @@
     if ((plan.outsourced || []).length) {
       lines.push("Outsourced:");
       plan.outsourced.forEach((job) => lines.push(`- ${job.workticket} · ${job.outQty || 0} pts · ${job.name}`));
+      lines.push("");
+    }
+    if ((plan.barred || []).length) {
+      lines.push("Barred:");
+      plan.barred.forEach((job) => lines.push(`- ${job.workticket} · ${job.barQty || 0} pts · ${job.name}`));
       lines.push("");
     }
     lines.push("Print order:");
@@ -2146,7 +2381,7 @@
     .bosq-hero-name { margin-top: 3px; font-size: 13px; font-weight: 650; line-height: 1.25; }
     .bosq-hero-meta, .bosq-hero-slack { color: #c9c2b6; font-size: 11px; margin-top: 3px; }
     .bosq-hero-slack { color: #f3f0ea; }
-    .bosq-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin: 8px 0 6px; }
+    .bosq-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin: 8px 0 6px; }
     .bosq-stat { display: flex; flex-direction: column; align-items: flex-start; padding: 6px 8px; border-radius: 10px; }
     .bosq-stat b { font-size: 15px; font-variant-numeric: tabular-nums; }
     .bosq-stat span { color: #a39e94; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
@@ -2154,10 +2389,12 @@
     .bosq-stat[data-lens="tight"] b { color: #f97316; }
     .bosq-stat[data-lens="blind"] b { color: #8b5cf6; }
     .bosq-stat[data-lens="outsourced"] b { color: #ec4899; }
+    .bosq-stat[data-lens="barred"] b { color: #a8a29e; }
     .bosq-stat.is-on[data-lens="late"] { border-color: rgba(239,68,68,.7); }
     .bosq-stat.is-on[data-lens="tight"] { border-color: rgba(249,115,22,.7); }
     .bosq-stat.is-on[data-lens="blind"] { border-color: rgba(139,92,246,.7); }
     .bosq-stat.is-on[data-lens="outsourced"] { border-color: rgba(236,72,153,.7); }
+    .bosq-stat.is-on[data-lens="barred"] { border-color: rgba(168,162,158,.75); }
     .bosq-legend {
       display: flex; flex-wrap: wrap; gap: 8px 10px; margin: 0 0 6px;
       color: #a39e94; font-size: 10px;
@@ -2170,6 +2407,7 @@
     .bosq-legend [data-band="tight"] i { background: #f97316; }
     .bosq-legend [data-band="blind"] i { background: #8b5cf6; }
     .bosq-legend [data-band="outsourced"] i { background: #ec4899; }
+    .bosq-legend [data-band="barred"] i { background: #78716c; }
     .bosq-sensitivity { min-height: 14px; margin: 0 0 6px; color: #a39e94; font-size: 10px; }
     .bosq-tools { display: grid; grid-template-columns: 1fr; gap: 5px; }
     .bosq-board-acts { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 5px; }
@@ -2199,12 +2437,14 @@
     }
     .bosq-card-jump:hover .bosq-card-name { color: #f8f4ec; }
     .bosq-card-acts { display: flex; flex-direction: column; gap: 3px; }
-    .bosq-os, .bosq-more {
+    .bosq-os, .bosq-bar-btn, .bosq-more {
       min-width: 26px; height: 22px; padding: 0 5px; border-radius: 7px; font: 9px/1 "Segoe UI", sans-serif;
-      letter-spacing: .06em; text-transform: uppercase; cursor: pointer;
+      letter-spacing: .04em; text-transform: uppercase; cursor: pointer;
       border: 1px solid rgba(255,255,255,.1); background: #2a2621; color: #c9c2b6;
     }
     .bosq-os.is-on { background: rgba(236,72,153,.2); border-color: rgba(236,72,153,.7); color: #f9a8d4; }
+    .bosq-bar-btn.is-on { background: rgba(120,113,108,.28); border-color: rgba(168,162,158,.75); color: #e7e5e4; }
+    .bosq-part-acts { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
     .bosq-card-name { font-weight: 650; line-height: 1.25; }
     .bosq-card-meta, .bosq-card-time, .bosq-card-extra, .bosq-card-cue { color: #b7b1a7; font-size: 10px; }
     .bosq-card-time { color: #f3f0ea; }
@@ -2216,6 +2456,7 @@
     .bosq-card[data-band="held"] { box-shadow: inset 2px 0 0 #8a847b; }
     .bosq-card[data-band="ok"] { box-shadow: inset 2px 0 0 #84cc16; }
     .bosq-card[data-band="outsourced"] { box-shadow: inset 2px 0 0 #ec4899; }
+    .bosq-card[data-band="barred"] { box-shadow: inset 2px 0 0 #78716c; }
     .bosq-parts { display: flex; flex-direction: column; gap: 3px; padding: 3px 1px 1px; }
     .bosq-parts > p, .bosq-parts-empty { margin: 0 0 3px; color: #8f8a82; font-size: 10px; }
     .bosq-part { display: flex; gap: 5px; align-items: flex-start; padding: 5px 7px; border-radius: 8px; background: #181614; }
@@ -2236,6 +2477,8 @@
     .bosq-part[data-band="tight"] { box-shadow: inset 2px 0 0 #f97316; }
     .bosq-part[data-band="blind"] { box-shadow: inset 2px 0 0 #8b5cf6; }
     .bosq-part[data-band="outsourced"] { box-shadow: inset 2px 0 0 #ec4899; opacity: .9; }
+    .bosq-part[data-band="barred"] { box-shadow: inset 2px 0 0 #78716c; opacity: .88; }
+    .bosq-part-tag[data-tag="barred"] { color: #d6d3d1; }
     .bosq-part[data-band="ok"] { box-shadow: inset 2px 0 0 #84cc16; }
     .bosq-mat { display: grid; grid-template-columns: 64px 1fr auto; gap: 8px; align-items: center; font-size: 11px; margin-bottom: 4px; }
     .bosq-bar { height: 5px; border-radius: 99px; background: #100f0d; overflow: hidden; }
@@ -2286,12 +2529,18 @@
       background-color: rgba(236, 72, 153, 0.1) !important;
     }
     html[data-theme="dark"] tr[data-bosq-band="outsourced"] > td { background-color: rgba(236, 72, 153, 0.12) !important; }
+    tr[data-bosq-band="barred"] > td {
+      box-shadow: inset 3px 0 0 #78716c;
+      background-color: rgba(120, 113, 108, 0.12) !important;
+    }
+    html[data-theme="dark"] tr[data-bosq-band="barred"] > td { background-color: rgba(168, 162, 158, 0.1) !important; }
     tr[data-bosq-part-band] > td { transition: background-color 0.12s ease, box-shadow 0.12s ease; }
     tr[data-bosq-part-band="late"] > td { box-shadow: inset 3px 0 0 #ef4444; background-color: rgba(239, 68, 68, 0.08) !important; }
     tr[data-bosq-part-band="tight"] > td { box-shadow: inset 3px 0 0 #f97316; background-color: rgba(249, 115, 22, 0.08) !important; }
     tr[data-bosq-part-band="blind"] > td { box-shadow: inset 3px 0 0 #8b5cf6; background-color: rgba(139, 92, 246, 0.08) !important; }
     tr[data-bosq-part-band="ok"] > td { box-shadow: inset 3px 0 0 #84cc16; background-color: rgba(132, 204, 22, 0.05) !important; }
     tr[data-bosq-part-band="outsourced"] > td { box-shadow: inset 3px 0 0 #ec4899; background-color: rgba(236, 72, 153, 0.08) !important; }
+    tr[data-bosq-part-band="barred"] > td { box-shadow: inset 3px 0 0 #78716c; background-color: rgba(120, 113, 108, 0.08) !important; }
     tr.bosq-dim { opacity: .45; }
     tr.bosq-flash { position: relative; z-index: 2; }
     tr.bosq-flash > td {
@@ -2329,6 +2578,7 @@
     .bosq-farm[data-band="held"] { color: #e7e5e4; }
     .bosq-farm[data-band="ok"] { color: #d9f99d; }
     .bosq-farm[data-band="outsourced"] { color: #f9a8d4; }
+    .bosq-farm[data-band="barred"] { color: #d6d3d1; }
     @keyframes bosq-flash-pulse {
       0%, 100% {
         background-color: inherit !important;
