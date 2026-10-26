@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.5
+// @version      1.3.6
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       Barrows Additive
 // @license      MIT
@@ -2690,15 +2690,18 @@
       background: transparent; border: 0; color: inherit; padding: 0; cursor: pointer; font: inherit;
     }
     .bosq-card-jump:hover .bosq-card-name { color: #f8f4ec; }
-    .bosq-card-acts { display: flex; flex-direction: column; gap: 3px; }
+    .bosq-card-acts {
+      display: flex; flex-direction: row; flex-wrap: nowrap; gap: 3px; flex-shrink: 0; align-self: flex-start;
+    }
     .bosq-os, .bosq-bar-btn, .bosq-more {
-      min-width: 26px; height: 22px; padding: 0 5px; border-radius: 7px; font: 9px/1 "Segoe UI", sans-serif;
+      min-width: 0; flex: 1 1 0; height: 22px; padding: 0 4px; border-radius: 7px; font: 9px/1 "Segoe UI", sans-serif;
       letter-spacing: .04em; text-transform: uppercase; cursor: pointer;
       border: 1px solid rgba(255,255,255,.1); background: #2a2621; color: #c9c2b6;
     }
     .bosq-os.is-on { background: rgba(236,72,153,.2); border-color: rgba(236,72,153,.7); color: #f9a8d4; }
     .bosq-bar-btn.is-on { background: rgba(120,113,108,.28); border-color: rgba(168,162,158,.75); color: #e7e5e4; }
-    .bosq-part-acts { display: flex; flex-direction: column; gap: 3px; flex-shrink: 0; }
+    .bosq-part-acts { display: flex; flex-direction: row; flex-wrap: nowrap; gap: 3px; flex-shrink: 0; align-self: center; }
+    .bosq-part-acts .bosq-os, .bosq-part-acts .bosq-bar-btn { flex: 1 1 0; min-width: 26px; }
     .bosq-card-name { font-weight: 650; line-height: 1.25; }
     .bosq-card-meta, .bosq-card-time, .bosq-card-extra, .bosq-card-cue { color: #b7b1a7; font-size: 10px; }
     .bosq-card-time { color: #f3f0ea; }
