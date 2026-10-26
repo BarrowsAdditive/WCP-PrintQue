@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.3
+// @version      1.3.4
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       Barrows Additive
 // @license      MIT
@@ -635,6 +635,7 @@
     left: null,
     panelWidth: 354,
     panelHeight: null,
+    calendarExpanded: false,
   };
 
   function loadSettings() {
@@ -1655,7 +1656,7 @@
       '    <span data-band="outsourced"><i></i>OS</span>',
       '    <span data-band="barred"><i></i>Bar</span>',
       "  </div>",
-      '  <div class="bosq-cal" data-slot="calendar"></div>',
+      '  <details class="bosq-cal" data-slot="calendar" hidden></details>',
       '  <p class="bosq-sensitivity" data-slot="sense"></p>',
       '  <div class="bosq-tools">',
       '    <select data-slot="strategy" aria-label="Queue strategy"></select>',
@@ -1726,6 +1727,7 @@
       scan();
     });
     root.addEventListener("click", onPanelClick);
+    root.addEventListener("toggle", onPanelToggle, true);
     dragPanel(root.querySelector(".bosq-head"), root);
     root.querySelectorAll(".bosq-resize").forEach((handle) => {
       const mode = handle.classList.contains("bosq-resize-se")
@@ -2005,7 +2007,17 @@
     root.querySelector("[data-slot=hero]").innerHTML = heroHtml(shown);
     root.querySelector("[data-slot=stats]").innerHTML = statsHtml(plan);
     const calSlot = ensureCalendarSlot();
-    if (calSlot) calSlot.innerHTML = calendarHtml(plan);
+    if (calSlot) {
+      const calMarkup = calendarHtml(plan);
+      if (!calMarkup) {
+        calSlot.hidden = true;
+        calSlot.innerHTML = "";
+      } else {
+        calSlot.hidden = false;
+        calSlot.innerHTML = calMarkup;
+        calSlot.open = !!settings.calendarExpanded;
+      }
+    }
     root.querySelector("[data-slot=sense]").textContent = sensitivity(plan, jobs);
 
     const fingerprint = fingerprintOf(plan);
@@ -2060,9 +2072,10 @@
     if (!ui || !ui.root) return null;
     let slot = ui.root.querySelector("[data-slot=calendar]");
     if (slot) return slot;
-    slot = document.createElement("div");
+    slot = document.createElement("details");
     slot.className = "bosq-cal";
     slot.setAttribute("data-slot", "calendar");
+    slot.hidden = true;
     const legend = ui.root.querySelector(".bosq-legend");
     if (legend) legend.after(slot);
     else {
@@ -2096,7 +2109,18 @@
       ).join("");
       sheet = `<div class="bosq-cal-sheet"><p>${esc(formatDay(new Date(selected.ms)))} · ${esc(utilPct)} by this date${selected.jobs.length ? " · " + selected.jobs.length + " due" : ""}</p>${rows || "<p>Nothing due this day.</p>"}${extra > 0 ? `<p>+${extra} more</p>` : ""}</div>`;
     }
-    return `<div class="bosq-cal-head">${esc(cal.headline)}</div><div class="bosq-cal-grid" role="grid" aria-label="Farm calendar">${cells}</div>${sheet}<p class="bosq-cal-cap">${esc(cal.caption)}</p>`;
+    return [
+      `<summary class="bosq-cal-sum">Farm calendar <span class="bosq-cal-hint">${esc(cal.headline)}</span></summary>`,
+      `<div class="bosq-cal-grid" role="grid" aria-label="Farm calendar">${cells}</div>`,
+      sheet,
+      `<p class="bosq-cal-cap">${esc(cal.caption)}</p>`,
+    ].join("");
+  }
+
+  function onPanelToggle(event) {
+    const cal = event.target;
+    if (!cal.matches || !cal.matches('details.bosq-cal[data-slot="calendar"]')) return;
+    saveSettings({ calendarExpanded: cal.open });
   }
 
   function sensitivity(plan, jobs) {
@@ -2287,7 +2311,14 @@
       const key = calDay.getAttribute("data-cal-day");
       calendarDayKey = calendarDayKey === key ? "" : key;
       const slot = ensureCalendarSlot();
-      if (slot && currentPlan) slot.innerHTML = calendarHtml(currentPlan);
+      if (slot && currentPlan) {
+        const calMarkup = calendarHtml(currentPlan);
+        if (calMarkup) {
+          slot.hidden = false;
+          slot.innerHTML = calMarkup;
+          slot.open = !!settings.calendarExpanded;
+        }
+      }
       return;
     }
     const lensButton = event.target.closest("[data-lens]");
@@ -2585,7 +2616,16 @@
     .bosq-legend [data-band="outsourced"] i { background: #ec4899; }
     .bosq-legend [data-band="barred"] i { background: #78716c; }
     .bosq-cal { margin: 0 0 8px; }
-    .bosq-cal-head { color: #f3f0ea; font-size: 11px; font-weight: 650; margin: 0 0 6px; }
+    .bosq-cal-sum {
+      cursor: pointer; color: #c9c2b6; font-size: 11px; font-weight: 650;
+      list-style: none; display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+      margin: 0 0 6px; user-select: none;
+    }
+    .bosq-cal-sum::-webkit-details-marker { display: none; }
+    .bosq-cal-sum::before { content: "▸"; color: #8f8a82; margin-right: 6px; flex-shrink: 0; }
+    .bosq-cal[open] .bosq-cal-sum::before { content: "▾"; }
+    .bosq-cal-hint { color: #8f8a82; font-weight: 500; font-size: 10px; text-align: right; }
+    .bosq-cal:not([open]) .bosq-cal-sum { margin-bottom: 0; }
     .bosq-cal-grid {
       display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px;
     }
