@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.14
+// @version      1.3.15
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       WCP Print Queue
 // @license      MIT
@@ -1998,6 +1998,8 @@
   const PANEL_MAX_W = 720;
   const PANEL_MIN_H = 248;
   const PANEL_COLLAPSED_W = 218;
+  const PANEL_DOCK_TAB_W = 34;
+  const PANEL_DOCK_TAB_H = 40;
 
   function panelMaxWidth() {
     if (settings.docked) return Math.max(PANEL_MIN_W, window.innerWidth - 280);
@@ -2005,6 +2007,7 @@
   }
 
   function panelWidthNow() {
+    if (settings.docked && settings.collapsed) return PANEL_DOCK_TAB_W;
     if (settings.collapsed) return PANEL_COLLAPSED_W;
     return clamp(settings.panelWidth || 354, PANEL_MIN_W, panelMaxWidth());
   }
@@ -2028,8 +2031,15 @@
       root.style.top = "0px";
       root.style.left = "auto";
       root.style.right = "0px";
-      root.style.height = "100vh";
-      root.style.maxHeight = "100vh";
+      if (collapsed) {
+        root.style.height = PANEL_DOCK_TAB_H + "px";
+        root.style.maxHeight = PANEL_DOCK_TAB_H + "px";
+        root.style.minHeight = PANEL_DOCK_TAB_H + "px";
+      } else {
+        root.style.height = "100vh";
+        root.style.maxHeight = "100vh";
+        root.style.minHeight = "";
+      }
       applyDockPad();
       return;
     }
@@ -2181,9 +2191,6 @@
       dockBtn.title = "Dock to the right";
       dockBtn.classList.toggle("is-on", false);
     }
-    if (popBtn) {
-      popBtn.hidden = !settings.docked;
-    }
     applyCollapsed();
   }
 
@@ -2191,12 +2198,16 @@
     if (!ui) return;
     ui.root.classList.toggle("is-collapsed", !!settings.collapsed);
     ui.root.classList.toggle("is-docked", !!settings.docked);
+    ui.root.classList.toggle("is-dock-tab", !!(settings.docked && settings.collapsed));
     ui.root.querySelectorAll(".bosq-resize").forEach((el) => {
       el.hidden = !!settings.collapsed;
     });
+    const popBtn = ui.root.querySelector("[data-act=popout]");
+    if (popBtn) popBtn.hidden = !settings.docked || (settings.docked && settings.collapsed);
     const button = ui.root.querySelector("[data-act=collapse]");
-    button.textContent = settings.collapsed ? "+" : "–";
-    button.setAttribute("aria-label", settings.collapsed ? "Expand print queue" : "Collapse print queue");
+    const dockTab = settings.docked && settings.collapsed;
+    button.textContent = settings.collapsed ? (dockTab ? "▶" : "+") : "–";
+    button.setAttribute("aria-label", dockTab ? "Open print queue" : (settings.collapsed ? "Expand print queue" : "Collapse print queue"));
     place();
   }
 
@@ -2788,8 +2799,31 @@
       border-radius: 0; border-right: 0; border-top: 0; border-bottom: 0;
       box-shadow: -12px 0 32px rgba(0,0,0,.28);
     }
+    #bosq.is-docked.is-dock-tab {
+      height: 40px !important;
+      max-height: 40px !important;
+      min-height: 40px !important;
+      align-items: stretch;
+      justify-content: center;
+      border-radius: 0 0 0 10px;
+      border-bottom: 1px solid rgba(255,255,255,.06);
+      overflow: hidden;
+      box-shadow: -6px 4px 16px rgba(0,0,0,.35);
+    }
+    #bosq.is-docked.is-dock-tab .bosq-head {
+      flex: 1; justify-content: center; padding: 5px 4px; gap: 0;
+      cursor: pointer;
+      min-height: 0;
+    }
+    #bosq.is-docked.is-dock-tab .bosq-drag { display: none; }
+    #bosq.is-docked.is-dock-tab [data-act=dock],
+    #bosq.is-docked.is-dock-tab [data-act=popout] { display: none !important; }
+    #bosq.is-docked.is-dock-tab .bosq-icon[data-act=collapse] {
+      width: 28px; height: 28px; font-size: 14px; font-weight: 800;
+      border-radius: 8px;
+    }
     #bosq.is-docked:not(.is-collapsed) .bosq-head { cursor: default; }
-    #bosq.is-docked.is-collapsed .bosq-head { cursor: pointer; }
+    #bosq.is-docked.is-collapsed:not(.is-dock-tab) .bosq-head { cursor: pointer; }
     #bosq.is-docked .bosq-resize-e, #bosq.is-docked .bosq-resize-s, #bosq.is-docked .bosq-resize-se { display: none; }
     #bosq:not(.is-docked) .bosq-resize-w { display: none; }
     .bosq-head {
