@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.9
+// @version      1.3.10
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       Barrows Additive
 // @license      MIT
@@ -2793,19 +2793,42 @@
       border: 1px solid rgba(255,255,255,.06); background: #201d19; color: inherit;
       box-shadow: inset 2px 0 0 #6f6a62;
     }
-    .bosq-card-top { display: flex; gap: 5px; align-items: flex-start; }
+    .bosq-card-top { display: flex; gap: 6px; align-items: center; }
     .bosq-card-jump {
       flex: 1; display: flex; flex-direction: column; gap: 1px; text-align: left;
+      min-width: 0;
       background: transparent; border: 0; color: inherit; padding: 0; cursor: pointer; font: inherit;
     }
     .bosq-card-jump:hover .bosq-card-name { color: #f8f4ec; }
     .bosq-card-acts {
-      display: flex; flex-direction: row; flex-wrap: nowrap; gap: 3px; flex-shrink: 0; align-self: flex-start;
+      display: flex; flex-direction: row; flex-wrap: nowrap; gap: 5px; flex-shrink: 0; align-self: center;
     }
     .bosq-os, .bosq-bar-btn, .bosq-more {
-      min-width: 0; flex: 1 1 0; height: 22px; padding: 0 4px; border-radius: 7px; font: 9px/1 "Segoe UI", sans-serif;
+      min-width: 0; flex: 1 1 0; height: 22px; padding: 0 4px; border-radius: 7px; font: 600 9px/1 "Segoe UI", sans-serif;
       letter-spacing: .04em; text-transform: uppercase; cursor: pointer;
       border: 1px solid rgba(255,255,255,.1); background: #2a2621; color: #c9c2b6;
+    }
+    .bosq-card-acts .bosq-os,
+    .bosq-card-acts .bosq-bar-btn,
+    .bosq-card-acts .bosq-more {
+      flex: 0 0 auto;
+      min-width: 38px;
+      height: 30px;
+      padding: 0 9px;
+      border-radius: 8px;
+      font: 700 10px/1 "Segoe UI", sans-serif;
+      letter-spacing: .08em;
+      color: #ece8e2;
+      border-color: rgba(255,255,255,.14);
+      background: #2f2b25;
+    }
+    .bosq-card-acts .bosq-more {
+      min-width: 32px;
+      padding: 0 6px;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0;
+      line-height: 1;
     }
     .bosq-os.is-on { background: rgba(236,72,153,.2); border-color: rgba(236,72,153,.7); color: #f9a8d4; }
     .bosq-bar-btn.is-on { background: rgba(120,113,108,.28); border-color: rgba(168,162,158,.75); color: #e7e5e4; }
