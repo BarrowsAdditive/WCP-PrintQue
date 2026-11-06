@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.13
+// @version      1.3.14
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       WCP Print Queue
 // @license      MIT
@@ -188,7 +188,50 @@
       list.sort(byNeed);
       return { printed: list, parked: [] };
     }
+    if (settings.strategy === "heavy") {
+      list.sort((a, b) => (b.machineHours || 0) - (a.machineHours || 0) || (a.needBy || 0) - (b.needBy || 0));
+      return { printed: list, parked: [] };
+    }
     return null;
+  }
+
+  function farmOpenQty(job) {
+    return (job.parts || []).reduce((sum, p) => sum + (p.left > 0 && !p.outsourced && !p.barred ? p.left : 0), 0);
+  }
+
+  function sortJobsForListView(jobs) {
+    if (!jobs || !jobs.length) return [];
+    const view = settings.sortView || "plan";
+    if (view === "plan") return jobs.slice();
+    const list = jobs.slice();
+    if (view === "mostQty") {
+      list.sort((a, b) => {
+        const da = farmOpenQty(a);
+        const db = farmOpenQty(b);
+        if (db !== da) return db - da;
+        return (b.machineHours || 0) - (a.machineHours || 0);
+      });
+      return list;
+    }
+    if (view === "longPlate") {
+      list.sort((a, b) => {
+        const la = a.longestPartHours || 0;
+        const lb = b.longestPartHours || 0;
+        if (lb !== la) return lb - la;
+        return (b.machineHours || 0) - (a.machineHours || 0);
+      });
+      return list;
+    }
+    if (view === "mostHrs") {
+      list.sort((a, b) => {
+        const ha = a.machineHours || 0;
+        const hb = b.machineHours || 0;
+        if (hb !== ha) return hb - ha;
+        return farmOpenQty(b) - farmOpenQty(a);
+      });
+      return list;
+    }
+    return jobs.slice();
   }
 
   function partKey(name) {
@@ -651,6 +694,7 @@
     holdPre: true,
     dimOk: false,
     strategy: "dates",
+    sortView: "plan",
     filterOnly: false,
     tuned: false,
     collapsed: true,
@@ -1766,6 +1810,7 @@
       '  <div class="bosq-tools">',
       '    <select data-slot="strategy" aria-label="Queue strategy"></select>',
       "  </div>",
+      '  <div class="bosq-sort" data-slot="sort" aria-label="List order"></div>',
       '  <div class="bosq-board-acts">',
       '    <button type="button" data-act="board-expand">Expand all rows</button>',
       '    <button type="button" data-act="board-collapse">Collapse all rows</button>',
@@ -1801,22 +1846,27 @@
     document.documentElement.appendChild(root);
     const strategy = root.querySelector("[data-slot=strategy]");
     [
-      ["dates", "Save the dates"],
-      ["edd", "Earliest ex factory"],
-      ["slack", "Tightest slack"],
-      ["short", "Short jobs first"],
+      ["dates", "Save dates"],
+      ["edd", "Date order"],
+      ["slack", "Tight slack"],
+      ["short", "Short first"],
+      ["heavy", "Heavy first"],
     ].forEach(([value, label]) => {
       const option = document.createElement("option");
       option.value = value;
       option.textContent = label;
+      option.title = strategyHints[value] || "";
       strategy.appendChild(option);
     });
+    strategy.title = strategyHints[settings.strategy] || "";
     strategy.value = settings.strategy;
     strategy.addEventListener("change", () => {
       saveSettings({ strategy: strategy.value });
+      strategy.title = strategyHints[strategy.value] || "";
       lastFingerprint = "";
       scan();
     });
+    renderSortChips(root.querySelector("[data-slot=sort]"));
     root.querySelectorAll("[data-setting]").forEach((input) => {
       input.addEventListener("change", () => applySettingInput(input));
     });
@@ -1872,6 +1922,35 @@
     return `<label class="bosq-check"><input data-setting="${key}" type="checkbox"><span>${label}</span></label>`;
   }
 
+  function esc(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[ch]));
+  }
+
+  const sortViewOptions = [
+    ["plan", "Plan", "Use the queue order from your strategy (and parking rules)."],
+    ["mostQty", "Most qty", "Most open parts left to print (in-house qty only), then by total farm hours."],
+    ["longPlate", "Long plate", "Longest single-part serial time (per plate), then total farm hours."],
+    ["mostHrs", "Most hrs", "Most total in-house printer-hours left (includes scrap %), then by part count."],
+  ];
+
+  const strategyHints = {
+    dates: "Orders by prints-needed-by date. Long jobs that would make others miss are parked (shown under Park) so the rest can still hit their dates.",
+    edd: "Strict ex-factory date order on the shared farm clock. Does not park long jobs — use when you want pure date sequence.",
+    slack: "Puts the job with the least spare time (if it were printed alone today) first — good for finding what is already breathing on the deadline.",
+    short: "Clears shorter in-house jobs first (when they are not already missing). Still keeps jobs that would miss anyway near the front.",
+    heavy: "Puts the heaviest total in-house printer load first — good when you want to see the big consumers before smaller work.",
+  };
+
+  function renderSortChips(container) {
+    if (!container) return;
+    container.innerHTML = sortViewOptions.map(([key, label, hint]) => {
+      const on = (settings.sortView || "plan") === key;
+      return `<button type="button" class="bosq-sort-chip${on ? " is-on" : ""}" data-sort="${esc(key)}" title="${esc(hint)}" aria-pressed="${on ? "true" : "false"}">${esc(label)}</button>`;
+    }).join("");
+  }
+
   function fillSettings() {
     if (!ui) return;
     const root = ui.root;
@@ -1886,6 +1965,9 @@
     root.querySelector('[data-setting="holdPre"]').checked = !!settings.holdPre;
     root.querySelector('[data-setting="dimOk"]').checked = !!settings.dimOk;
     root.querySelector("[data-slot=strategy]").value = settings.strategy;
+    const stratEl = root.querySelector("[data-slot=strategy]");
+    if (stratEl && strategyHints && strategyHints[settings.strategy]) stratEl.title = strategyHints[settings.strategy];
+    renderSortChips(root.querySelector("[data-slot=sort]"));
   }
 
   function applySettingInput(input) {
@@ -2292,12 +2374,12 @@
       return section("Barred", jobs, "Not needed · only barred SKUs");
     }
     const sections = [];
-    const blind = plan.blind.concat(plan.nodate).filter(lensVisible);
-    const parked = plan.parked.filter(lensVisible);
-    const printed = plan.printed.filter(lensVisible);
-    const held = plan.held.filter(lensVisible);
-    const outsourced = (plan.outsourced || []).filter(lensVisible);
-    const barredJobs = (plan.barred || []).filter(lensVisible);
+    const blind = sortJobsForListView(plan.blind.concat(plan.nodate).filter(lensVisible));
+    const parked = sortJobsForListView(plan.parked.filter(lensVisible));
+    const printed = sortJobsForListView(plan.printed.filter(lensVisible));
+    const held = sortJobsForListView(plan.held.filter(lensVisible));
+    const outsourced = sortJobsForListView((plan.outsourced || []).filter(lensVisible));
+    const barredJobs = sortJobsForListView((plan.barred || []).filter(lensVisible));
     if (blind.length) sections.push(section("No runtime", blind, "Open parts, 0m left"));
     if (parked.length) sections.push(section("Park", parked, "Would push other dates"));
     if (printed.length) sections.push(section("Print order", printed, strategyBlurb()));
@@ -2314,11 +2396,23 @@
     if (settings.strategy === "edd") return "Strict date order";
     if (settings.strategy === "slack") return "Least spare first";
     if (settings.strategy === "short") return "Short jobs first";
+    if (settings.strategy === "heavy") return "Heavy jobs first";
     return "Dates, parking sink jobs";
   }
 
+  function sortListNote() {
+    const v = settings.sortView || "plan";
+    if (v === "plan") return "";
+    if (v === "mostQty") return "List sort · most qty";
+    if (v === "longPlate") return "List sort · long plate";
+    if (v === "mostHrs") return "List sort · most hrs";
+    return "";
+  }
+
   function section(title, jobs, note) {
-    return `<section><h3>${esc(title)}</h3><p>${esc(note)}</p>${jobs.map(cardHtml).join("")}</section>`;
+    const extra = sortListNote();
+    const fullNote = extra ? `${note} · ${extra}` : note;
+    return `<section><h3>${esc(title)}</h3><p>${esc(fullNote)}</p>${jobs.map(cardHtml).join("")}</section>`;
   }
 
   function cardHtml(job) {
@@ -2427,7 +2521,7 @@
 
   function fingerprintOf(plan) {
     const pack = (job) => [job.id, job.band, job.order, Math.round((job.queueSlackDays || 0) * 10), job.partCue, job.outQty, expandedIds.has(job.id) ? 1 : 0].join(":");
-    return [plan.tab, lens, settings.dimOk, JSON.stringify(outsourceMarks), JSON.stringify(barredMarks), plan.printed.map(pack).join(","), plan.parked.map(pack).join(","), plan.blind.map(pack).join(","), plan.held.map(pack).join(","), (plan.outsourced || []).map(pack).join(","), (plan.barred || []).map(pack).join(","), jobsWithOs(plan).map(pack).join(","), jobsWithBar(plan).map(pack).join(",")].join("~");
+    return [plan.tab, lens, settings.sortView || "plan", settings.dimOk, JSON.stringify(outsourceMarks), JSON.stringify(barredMarks), plan.printed.map(pack).join(","), plan.parked.map(pack).join(","), plan.blind.map(pack).join(","), plan.held.map(pack).join(","), (plan.outsourced || []).map(pack).join(","), (plan.barred || []).map(pack).join(","), jobsWithOs(plan).map(pack).join(","), jobsWithBar(plan).map(pack).join(",")].join("~");
   }
 
   function onPanelClick(event) {
@@ -2453,6 +2547,18 @@
           slot.open = !!settings.calendarExpanded;
         }
       }
+      return;
+    }
+    const sortChip = event.target.closest("[data-sort]");
+    if (sortChip) {
+      event.preventDefault();
+      const next = sortChip.getAttribute("data-sort");
+      if (!next) return;
+      saveSettings({ sortView: next });
+      lastFingerprint = "";
+      listScrollReset = true;
+      renderSortChips(ui.root.querySelector("[data-slot=sort]"));
+      scan();
       return;
     }
     const lensButton = event.target.closest("[data-lens]");
@@ -2604,12 +2710,6 @@
     const old = button.textContent;
     button.textContent = message;
     setTimeout(() => { button.textContent = old; }, 1200);
-  }
-
-  function esc(value) {
-    return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[ch]));
   }
 
   function boot() {
@@ -2811,6 +2911,18 @@
     .bosq-cal-job span:last-child { color: #a39e94; flex-shrink: 0; }
     .bosq-sensitivity { min-height: 14px; margin: 0 0 6px; color: #a39e94; font-size: 10px; }
     .bosq-tools { display: grid; grid-template-columns: 1fr; gap: 5px; }
+    .bosq-sort {
+      display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 4px;
+    }
+    .bosq-sort-chip {
+      flex: 1 1 auto; min-width: 0; padding: 4px 7px; border-radius: 8px;
+      border: 1px solid rgba(255,255,255,.08); background: #221f1b; color: #b7b1a7;
+      font: 600 9px/1.1 "Segoe UI", sans-serif; letter-spacing: .03em; cursor: pointer; text-align: center;
+    }
+    .bosq-sort-chip:hover { background: #2d2924; color: #e8e6e1; border-color: rgba(231,177,90,.22); }
+    .bosq-sort-chip.is-on {
+      border-color: rgba(231,177,90,.55); color: #e7b15a; background: #2a241c;
+    }
     .bosq-board-acts { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 5px; }
     .bosq-board-acts button {
       padding: 6px 7px; border-radius: 9px; border: 1px solid rgba(255,255,255,.08);
