@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.8
+// @version      1.3.9
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       Barrows Additive
 // @license      MIT
@@ -496,7 +496,7 @@
       }
       const remaining = load.hasParts ? load.qty : job.partsLeft;
       if (!(remaining > 0)) {
-        done.push(job);
+        done.push({ ...job, band: "done" });
         continue;
       }
       if (!job.needBy) {
@@ -1623,6 +1623,7 @@
 
   function clearInline(row) {
     row.removeAttribute("data-bosq-band");
+    row.removeAttribute("data-bosq-complete");
     row.removeAttribute("data-bosq-id");
     row.classList.remove("bosq-dim");
     const note = row.querySelector(":scope .bosq-farm");
@@ -1632,6 +1633,7 @@
       next.querySelectorAll("tr[data-bosq-part-band], tr[data-bosq-part]").forEach((tr) => {
         tr.removeAttribute("data-bosq-part-band");
         tr.removeAttribute("data-bosq-part");
+        tr.removeAttribute("data-bosq-complete");
       });
     }
   }
@@ -1639,27 +1641,29 @@
   function paintRow(job, planned) {
     const row = job.row;
     const band = planned ? planned.band : "";
+    const complete = !!(planned && planned.band === "done");
+    row.toggleAttribute("data-bosq-complete", complete);
     if (band && band !== "done") row.setAttribute("data-bosq-band", band);
     else row.removeAttribute("data-bosq-band");
     row.setAttribute("data-bosq-id", job.id);
-    row.classList.toggle("bosq-dim", !!(settings.dimOk && planned && planned.band === "ok"));
+    row.classList.toggle("bosq-dim", !!(settings.dimOk && planned && planned.band === "ok" && !complete));
     const host = job.progressEl && job.progressEl.querySelector(":scope .flex.flex-col, :scope > div");
     const parent = host || job.progressEl;
     if (!parent || !planned || planned.band === "done") {
       const old = row.querySelector(":scope .bosq-farm");
       if (old) old.remove();
-      return;
+    } else {
+      let note = parent.querySelector(":scope > .bosq-farm");
+      if (!note) {
+        note = document.createElement("div");
+        note.className = "bosq-farm";
+        parent.appendChild(note);
+      }
+      const line = inlineLine(planned);
+      note.textContent = line.label;
+      note.title = line.detail;
+      note.setAttribute("data-band", planned.band);
     }
-    let note = parent.querySelector(":scope > .bosq-farm");
-    if (!note) {
-      note = document.createElement("div");
-      note.className = "bosq-farm";
-      parent.appendChild(note);
-    }
-    const line = inlineLine(planned);
-    note.textContent = line.label;
-    note.title = line.detail;
-    note.setAttribute("data-band", planned.band);
     paintPartRows(job, planned);
   }
 
@@ -1669,8 +1673,8 @@
     (job.parts || []).forEach((part) => {
       if (!part.row) return;
       if (!(part.left > 0) && !part.outsourced && !part.barred) {
-        part.row.removeAttribute("data-bosq-part");
-        part.row.removeAttribute("data-bosq-part-band");
+        part.row.setAttribute("data-bosq-part", part.name);
+        part.row.setAttribute("data-bosq-part-band", "done");
         return;
       }
       const ranked = byName.get(partKey(part.name));
@@ -2836,7 +2840,7 @@
     .bosq-part-name { font-size: 11px; font-weight: 650; }
     .bosq-part-clock { font-size: 10px; color: #b7b1a7; }
     .bosq-part[data-band="late"] { box-shadow: inset 2px 0 0 #ef4444; }
-    .bosq-part[data-band="tight"] { box-shadow: inset 2px 0 0 #f97316; }
+    .bosq-part[data-band="tight"] { box-shadow: inset 2px 0 0 #f59e0b; }
     .bosq-part[data-band="blind"] { box-shadow: inset 2px 0 0 #8b5cf6; }
     .bosq-part[data-band="outsourced"] { box-shadow: inset 2px 0 0 #ec4899; opacity: .9; }
     .bosq-part[data-band="barred"] { box-shadow: inset 2px 0 0 #78716c; opacity: .88; }
@@ -2859,8 +2863,8 @@
       background-color: rgba(239, 68, 68, 0.1) !important;
     }
     tr[data-bosq-band="tight"] > td {
-      box-shadow: inset 3px 0 0 #f97316;
-      background-color: rgba(249, 115, 22, 0.1) !important;
+      box-shadow: inset 3px 0 0 #f59e0b;
+      background-color: rgba(245, 158, 11, 0.11) !important;
     }
     tr[data-bosq-band="blind"] > td,
     tr[data-bosq-band="nodate"] > td {
@@ -2880,7 +2884,7 @@
       background-color: rgba(132, 204, 22, 0.07) !important;
     }
     html[data-theme="dark"] tr[data-bosq-band="late"] > td { background-color: rgba(239, 68, 68, 0.14) !important; }
-    html[data-theme="dark"] tr[data-bosq-band="tight"] > td { background-color: rgba(249, 115, 22, 0.12) !important; }
+    html[data-theme="dark"] tr[data-bosq-band="tight"] > td { background-color: rgba(245, 158, 11, 0.13) !important; }
     html[data-theme="dark"] tr[data-bosq-band="blind"] > td,
     html[data-theme="dark"] tr[data-bosq-band="nodate"] > td { background-color: rgba(139, 92, 246, 0.12) !important; }
     html[data-theme="dark"] tr[data-bosq-band="parked"] > td { background-color: rgba(100, 116, 139, 0.12) !important; }
@@ -2898,11 +2902,31 @@
     html[data-theme="dark"] tr[data-bosq-band="barred"] > td { background-color: rgba(168, 162, 158, 0.1) !important; }
     tr[data-bosq-part-band] > td { transition: background-color 0.12s ease, box-shadow 0.12s ease; }
     tr[data-bosq-part-band="late"] > td { box-shadow: inset 3px 0 0 #ef4444; background-color: rgba(239, 68, 68, 0.08) !important; }
-    tr[data-bosq-part-band="tight"] > td { box-shadow: inset 3px 0 0 #f97316; background-color: rgba(249, 115, 22, 0.08) !important; }
+    tr[data-bosq-part-band="tight"] > td { box-shadow: inset 3px 0 0 #f59e0b; background-color: rgba(245, 158, 11, 0.09) !important; }
     tr[data-bosq-part-band="blind"] > td { box-shadow: inset 3px 0 0 #8b5cf6; background-color: rgba(139, 92, 246, 0.08) !important; }
     tr[data-bosq-part-band="ok"] > td { box-shadow: inset 3px 0 0 #84cc16; background-color: rgba(132, 204, 22, 0.05) !important; }
     tr[data-bosq-part-band="outsourced"] > td { box-shadow: inset 3px 0 0 #ec4899; background-color: rgba(236, 72, 153, 0.08) !important; }
     tr[data-bosq-part-band="barred"] > td { box-shadow: inset 3px 0 0 #78716c; background-color: rgba(120, 113, 108, 0.08) !important; }
+    tr[data-bosq-complete="true"] > td {
+      box-shadow: none !important;
+      background-color: rgba(0,0,0,.18) !important;
+      opacity: .62;
+      filter: saturate(0.55);
+    }
+    html[data-theme="dark"] tr[data-bosq-complete="true"] > td {
+      background-color: rgba(0,0,0,.28) !important;
+      opacity: .58;
+    }
+    tr[data-bosq-part-band="done"] > td {
+      box-shadow: none !important;
+      background-color: rgba(0,0,0,.14) !important;
+      opacity: .62;
+      filter: saturate(0.5);
+    }
+    html[data-theme="dark"] tr[data-bosq-part-band="done"] > td {
+      background-color: rgba(0,0,0,.24) !important;
+      opacity: .56;
+    }
     tr.bosq-dim { opacity: .45; }
     tr.bosq-flash { position: relative; z-index: 2; }
     tr.bosq-flash > td {
