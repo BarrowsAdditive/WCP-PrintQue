@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.12
+// @version      1.3.13
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       WCP Print Queue
 // @license      MIT
@@ -639,6 +639,8 @@
   }
   /* BOSQ_PURE_END */
 
+  const SETTINGS_SCHEMA = 2;
+
   const DEFAULTS = {
     machines: 6,
     hoursPerDay: 20,
@@ -652,20 +654,28 @@
     filterOnly: false,
     tuned: false,
     collapsed: true,
-    docked: false,
+    docked: true,
     dockGap: 16,
     top: 78,
     left: null,
     panelWidth: 354,
     panelHeight: null,
     calendarExpanded: false,
+    settingsSchema: SETTINGS_SCHEMA,
   };
 
   function loadSettings() {
     try {
       const raw = storageGet(STORAGE_KEY);
       const saved = JSON.parse(raw || "null");
-      return { ...DEFAULTS, ...(saved || {}) };
+      const merged = { ...DEFAULTS, ...(saved || {}) };
+      if ((merged.settingsSchema || 0) < SETTINGS_SCHEMA) {
+        merged.docked = true;
+        merged.collapsed = true;
+        merged.settingsSchema = SETTINGS_SCHEMA;
+        storageSet(STORAGE_KEY, JSON.stringify(merged));
+      }
+      return merged;
     } catch {
       return { ...DEFAULTS };
     }
@@ -1736,8 +1746,9 @@
       '    <span class="bosq-markicon" aria-hidden="true"></span>',
       '    <span class="bosq-title">Print queue</span>',
       "  </button>",
-      '  <button type="button" class="bosq-icon" data-act="dock" aria-label="Dock to the right" title="Dock to the right">⇥</button>',
+      '  <button type="button" class="bosq-icon" data-act="popout" aria-label="Pop out to floating window" title="Pop out">⎘</button>',
       '  <button type="button" class="bosq-icon" data-act="collapse" aria-label="Collapse" title="Collapse (Alt+Q)">–</button>',
+      '  <button type="button" class="bosq-icon" data-act="dock" aria-label="Dock to the right" title="Dock to the right">⇥</button>',
       "</header>",
       '<div class="bosq-body">',
       '  <p class="bosq-tune" data-slot="tune" hidden></p>',
@@ -1810,6 +1821,8 @@
       input.addEventListener("change", () => applySettingInput(input));
     });
     root.querySelector("[data-act=dock]").addEventListener("click", toggleDocked);
+    root.querySelector("[data-act=popout]").addEventListener("click", popOutPanel);
+    root.querySelector(".bosq-drag").addEventListener("click", onHeaderTitleClick);
     root.querySelector("[data-act=collapse]").addEventListener("click", toggleCollapsed);
     root.querySelector("[data-act=board-expand]").addEventListener("click", () => { expandBoardAll(); });
     root.querySelector("[data-act=board-collapse]").addEventListener("click", () => { collapseBoardAll(); });
@@ -2047,24 +2060,47 @@
     handle.addEventListener("pointercancel", end);
   }
 
+  function onHeaderTitleClick(event) {
+    if (!settings.docked || !settings.collapsed) return;
+    event.preventDefault();
+    event.stopPropagation();
+    saveSettings({ collapsed: false });
+    applyCollapsed();
+  }
+
+  function popOutPanel() {
+    if (!settings.docked) return;
+    saveSettings({ docked: false, collapsed: true });
+    applyDocked();
+  }
+
   function toggleCollapsed() {
     saveSettings({ collapsed: !settings.collapsed });
     applyCollapsed();
   }
 
   function toggleDocked() {
-    saveSettings({ docked: !settings.docked, collapsed: settings.docked ? settings.collapsed : false });
+    const nextDocked = !settings.docked;
+    saveSettings({
+      docked: nextDocked,
+      collapsed: nextDocked ? true : settings.collapsed,
+    });
     applyDocked();
   }
 
   function applyDocked() {
     if (!ui) return;
-    const button = ui.root.querySelector("[data-act=dock]");
-    if (button) {
-      button.textContent = settings.docked ? "⇤" : "⇥";
-      button.setAttribute("aria-label", settings.docked ? "Undock print queue" : "Dock to the right");
-      button.title = settings.docked ? "Undock" : "Dock to the right";
-      button.classList.toggle("is-on", !!settings.docked);
+    const dockBtn = ui.root.querySelector("[data-act=dock]");
+    const popBtn = ui.root.querySelector("[data-act=popout]");
+    if (dockBtn) {
+      dockBtn.hidden = !!settings.docked;
+      dockBtn.textContent = "⇥";
+      dockBtn.setAttribute("aria-label", "Dock to the right");
+      dockBtn.title = "Dock to the right";
+      dockBtn.classList.toggle("is-on", false);
+    }
+    if (popBtn) {
+      popBtn.hidden = !settings.docked;
     }
     applyCollapsed();
   }
@@ -2652,7 +2688,8 @@
       border-radius: 0; border-right: 0; border-top: 0; border-bottom: 0;
       box-shadow: -12px 0 32px rgba(0,0,0,.28);
     }
-    #bosq.is-docked .bosq-head { cursor: default; }
+    #bosq.is-docked:not(.is-collapsed) .bosq-head { cursor: default; }
+    #bosq.is-docked.is-collapsed .bosq-head { cursor: pointer; }
     #bosq.is-docked .bosq-resize-e, #bosq.is-docked .bosq-resize-s, #bosq.is-docked .bosq-resize-se { display: none; }
     #bosq:not(.is-docked) .bosq-resize-w { display: none; }
     .bosq-head {
@@ -2666,6 +2703,7 @@
       background: transparent; color: inherit; border: 0; padding: 0; cursor: inherit; text-align: left;
       pointer-events: none;
     }
+    #bosq.is-docked.is-collapsed .bosq-drag { pointer-events: auto; cursor: pointer; }
     .bosq-resize { position: absolute; z-index: 3; touch-action: none; }
     .bosq-resize-w { top: 10px; left: 0; width: 10px; height: calc(100% - 20px); cursor: ew-resize; }
     .bosq-resize-e { top: 10px; right: 0; width: 10px; height: calc(100% - 22px); cursor: ew-resize; }
@@ -2688,6 +2726,7 @@
       border-radius: 999px; cursor: pointer;
     }
     .bosq-icon { width: 26px; height: 26px; flex: 0 0 26px; }
+    .bosq-icon[data-act=popout] { font-size: 15px; line-height: 1; }
     .bosq-icon.is-on { border-color: rgba(231,177,90,.7); color: #e7b15a; }
     .bosq-body { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 0 11px 11px; }
     .bosq-tune { margin: 0 0 8px; padding: 6px 8px; border-radius: 8px; background: rgba(231,177,90,.12); color: #f0d7a4; font-size: 11px; }
