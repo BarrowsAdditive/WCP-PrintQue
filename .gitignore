@@ -1,6 +1,8 @@
 # Local HTML test exports (keep out of repo)
 *_tab.html
 *_tab_files/
+*Manufacturing tab*.html
+*Manufacturing tab*_files/
 
 *.zip
 .DS_Store
