@@ -24,6 +24,10 @@ Violentmonkey hits `@updateURL` (the small `.meta.js` header). If the version is
 
 Typical check interval is about a day. In Violentmonkey you can also open the script → **Check for updates**.
 
+## Saving settings and OS/Bar marks
+
+Everything (farm numbers, dock position, outsource and barred marks) is stored in the **browser** (like `localStorage`). A different PC, another browser profile, clearing site data, or strict privacy modes can make it look like the script “forgot”. The panel also writes a **session backup** when local storage is unavailable. For a durable copy you can move between machines, use **Farm settings → Export saved data** / **Import saved data**.
+
 ## Repo layout
 
 | File | Role |

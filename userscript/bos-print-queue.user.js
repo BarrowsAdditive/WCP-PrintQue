@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.7
+// @version      1.3.8
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       Barrows Additive
 // @license      MIT
@@ -22,6 +22,27 @@
   const STORAGE_KEY = "bosq-settings-v1";
   const OUTSOURCE_KEY = "bosq-outsourced-v1";
   const BARRED_KEY = "bosq-barred-v1";
+
+  function storageGet(key) {
+    try {
+      const v = localStorage.getItem(key);
+      if (v != null && v !== "") return v;
+    } catch (e) { /* quota / private mode */ }
+    try {
+      return sessionStorage.getItem(key);
+    } catch (e2) { /* */ }
+    return null;
+  }
+
+  function storageSet(key, value) {
+    try { localStorage.setItem(key, value); } catch (e) { /* */ }
+    try { sessionStorage.setItem(key, value); } catch (e2) { /* */ }
+  }
+
+  function storageRemove(key) {
+    try { localStorage.removeItem(key); } catch (e) { /* */ }
+    try { sessionStorage.removeItem(key); } catch (e2) { /* */ }
+  }
 
   /* BOSQ_PURE_START */
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
@@ -632,7 +653,7 @@
     strategy: "dates",
     filterOnly: false,
     tuned: false,
-    collapsed: false,
+    collapsed: true,
     docked: false,
     dockGap: 16,
     top: 78,
@@ -644,7 +665,8 @@
 
   function loadSettings() {
     try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+      const raw = storageGet(STORAGE_KEY);
+      const saved = JSON.parse(raw || "null");
       return { ...DEFAULTS, ...(saved || {}) };
     } catch {
       return { ...DEFAULTS };
@@ -653,7 +675,7 @@
 
   function saveSettings(next) {
     settings = { ...settings, ...next };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    storageSet(STORAGE_KEY, JSON.stringify(settings));
   }
 
   let settings = loadSettings();
@@ -680,7 +702,7 @@
 
   function loadOutsource() {
     try {
-      const saved = JSON.parse(localStorage.getItem(OUTSOURCE_KEY) || "{}");
+      const saved = JSON.parse(storageGet(OUTSOURCE_KEY) || "{}");
       return saved && typeof saved === "object" ? saved : {};
     } catch {
       return {};
@@ -688,7 +710,7 @@
   }
 
   function saveOutsource() {
-    localStorage.setItem(OUTSOURCE_KEY, JSON.stringify(outsourceMarks));
+    storageSet(OUTSOURCE_KEY, JSON.stringify(outsourceMarks));
   }
 
   function outsourceRec(jobId) {
@@ -724,7 +746,7 @@
 
   function loadBarred() {
     try {
-      const saved = JSON.parse(localStorage.getItem(BARRED_KEY) || "{}");
+      const saved = JSON.parse(storageGet(BARRED_KEY) || "{}");
       return saved && typeof saved === "object" ? saved : {};
     } catch {
       return {};
@@ -732,7 +754,69 @@
   }
 
   function saveBarred() {
-    localStorage.setItem(BARRED_KEY, JSON.stringify(barredMarks));
+    storageSet(BARRED_KEY, JSON.stringify(barredMarks));
+  }
+
+  function reloadPersistedState() {
+    settings = loadSettings();
+    outsourceMarks = loadOutsource();
+    barredMarks = loadBarred();
+    if (ui && ui.root) {
+      fillSettings();
+      applyDocked();
+    }
+    lastFingerprint = "";
+  }
+
+  function exportBosqData() {
+    const payload = {
+      v: 1,
+      exportedAt: new Date().toISOString(),
+      settings: settings,
+      outsourceMarks,
+      barredMarks,
+    };
+    const text = JSON.stringify(payload, null, 0);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        () => window.alert("BOS Print Queue: backup copied to clipboard. Paste into a text file to keep it."),
+        () => window.prompt("Copy this backup JSON:", text)
+      );
+    } else {
+      window.prompt("Copy this backup JSON:", text);
+    }
+  }
+
+  function importBosqData() {
+    const raw = window.prompt("Paste a backup JSON (from Export saved data):");
+    if (raw == null || !String(raw).trim()) return;
+    let data;
+    try {
+      data = JSON.parse(String(raw).trim());
+    } catch (err) {
+      window.alert("Could not parse JSON.");
+      return;
+    }
+    if (!data || typeof data !== "object") {
+      window.alert("Invalid backup.");
+      return;
+    }
+    if (data.settings && typeof data.settings === "object") {
+      storageSet(STORAGE_KEY, JSON.stringify({ ...DEFAULTS, ...data.settings }));
+    }
+    if (data.outsourceMarks && typeof data.outsourceMarks === "object") {
+      storageSet(OUTSOURCE_KEY, JSON.stringify(data.outsourceMarks));
+    } else if (data.outsource && typeof data.outsource === "object") {
+      storageSet(OUTSOURCE_KEY, JSON.stringify(data.outsource));
+    }
+    if (data.barredMarks && typeof data.barredMarks === "object") {
+      storageSet(BARRED_KEY, JSON.stringify(data.barredMarks));
+    } else if (data.barred && typeof data.barred === "object") {
+      storageSet(BARRED_KEY, JSON.stringify(data.barred));
+    }
+    reloadPersistedState();
+    scan();
+    window.alert("Import applied.");
   }
 
   function barredRec(jobId) {
@@ -1689,9 +1773,11 @@
       check("dimOk", "Fade rows that have spare time"),
       '    <div class="bosq-actions">',
       '      <button type="button" data-act="copy">Copy handover</button>',
+      '      <button type="button" data-act="export-data" title="Copy settings and OS/Bar marks as JSON">Export saved data</button>',
+      '      <button type="button" data-act="import-data" title="Restore from a previous export">Import saved data</button>',
       '      <button type="button" data-act="reset">Reset settings</button>',
       "    </div>",
-      '    <p class="bosq-fine">Time Left on the board is one printer running nonstop. Ex factory is when the unit leaves, so prints are pulled forward by the buffer above. Outsourced marks live only in this browser — they never write back to BOS. Expand a job card to see which SKUs to print first.</p>',
+      '    <p class="bosq-fine">Time Left on the board is one printer running nonstop. Ex factory is when the unit leaves, so prints are pulled forward by the buffer above. Settings and OS/Bar marks are saved in this browser (and a session copy if local storage is cleared). Use Export / Import to move them to another PC or profile. They never write back to BOS. Expand a job card to see which SKUs to print first.</p>',
       "  </details>",
       "</div>",
       '<div class="bosq-resize bosq-resize-w" title="Drag to resize width" aria-hidden="true"></div>',
@@ -1727,13 +1813,15 @@
     root.querySelector("[data-act=board-collapse]").addEventListener("click", () => { collapseBoardAll(); });
     root.querySelector("[data-act=copy]").addEventListener("click", copyHandover);
     root.querySelector("[data-act=reset]").addEventListener("click", () => {
-      localStorage.removeItem(STORAGE_KEY);
+      storageRemove(STORAGE_KEY);
       settings = { ...DEFAULTS };
       lastFingerprint = "";
       applyDocked();
       fillSettings();
       scan();
     });
+    root.querySelector("[data-act=export-data]").addEventListener("click", exportBosqData);
+    root.querySelector("[data-act=import-data]").addEventListener("click", importBosqData);
     root.addEventListener("click", onPanelClick);
     root.addEventListener("toggle", onPanelToggle, true);
     dragPanel(root.querySelector(".bosq-head"), root);
@@ -1812,7 +1900,7 @@
   const PANEL_MIN_W = 268;
   const PANEL_MAX_W = 720;
   const PANEL_MIN_H = 248;
-  const PANEL_COLLAPSED_W = 160;
+  const PANEL_COLLAPSED_W = 218;
 
   function panelMaxWidth() {
     if (settings.docked) return Math.max(PANEL_MIN_W, window.innerWidth - 280);
@@ -2525,6 +2613,13 @@
 
   hookNetwork();
   watchNavigation();
+  window.addEventListener("storage", (event) => {
+    if (!event.key) return;
+    if (event.key !== STORAGE_KEY && event.key !== OUTSOURCE_KEY && event.key !== BARRED_KEY) return;
+    if (!onBoard() || !ui) return;
+    reloadPersistedState();
+    scan();
+  });
   setInterval(() => { if (onBoard()) scheduleScan(); }, 4000);
 
   const CSS = `
@@ -2560,6 +2655,7 @@
     .bosq-head {
       display: flex; align-items: center; gap: 6px; padding: 8px 8px 8px 11px;
       cursor: grab; touch-action: none;
+      min-width: 0;
     }
     #bosq.bosq-moving .bosq-head { cursor: grabbing; }
     .bosq-drag {
@@ -2582,7 +2678,8 @@
       opacity: .85;
     }
     .bosq-markicon { width: 7px; height: 7px; border-radius: 99px; background: #e7b15a; box-shadow: 0 0 0 3px rgba(231,177,90,.14); }
-    .bosq-title { font-size: 12px; font-weight: 650; letter-spacing: .01em; }
+    .bosq-title { font-size: 12px; font-weight: 650; letter-spacing: .01em; white-space: nowrap; flex-shrink: 0; }
+    #bosq.is-collapsed .bosq-head { flex-wrap: nowrap; }
     .bosq-icon, .bosq-actions button, .bosq-stat {
       border: 1px solid rgba(255,255,255,.08); background: #221f1b; color: #e8e6e1;
       border-radius: 999px; cursor: pointer;
@@ -2753,7 +2850,7 @@
     .bosq-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 8px; }
     .bosq-grid label, .bosq-check { display: flex; flex-direction: column; gap: 3px; color: #a39e94; font-size: 10px; }
     .bosq-check { flex-direction: row; align-items: center; gap: 7px; margin-top: 7px; color: #e8e6e1; font-size: 11px; }
-    .bosq-actions { display: flex; gap: 5px; margin: 8px 0; }
+    .bosq-actions { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; }
     .bosq-actions button { padding: 5px 9px; font: inherit; }
     .bosq-empty { color: #a39e94; padding: 10px 2px; }
     tr[data-bosq-band] > td { transition: background-color 0.12s ease, box-shadow 0.12s ease; }
