@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.19
+// @version      1.3.20
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       WCP Print Queue
 // @license      MIT
@@ -134,45 +134,78 @@
     return days;
   }
 
+  function dueMs(job) {
+    if (job && job.exFactory) return job.exFactory.getTime();
+    if (job && job.needBy) return job.needBy.getTime();
+    return null;
+  }
+
   function scheduleSequence(jobs, settings, now) {
     let cursor = now;
     return jobs.map((job) => {
       const finish = addCapacity(cursor, job.capacityDays, settings.weekends);
-      const queued = { ...job, start: cursor, finish, queueSlackDays: (job.needBy.getTime() - finish) / 86400000 };
+      const due = dueMs(job);
+      const queued = { ...job, start: cursor, finish, queueSlackDays: due != null ? (due - finish) / 86400000 : null };
       cursor = finish;
       return queued;
     });
   }
 
-  function byNeed(a, b) {
-    const d = a.needBy - b.needBy;
+  function byExFactory(a, b) {
+    const d = (dueMs(a) || 0) - (dueMs(b) || 0);
     if (d) return d;
-    return a.machineHours - b.machineHours;
+    return (a.machineHours || 0) - (b.machineHours || 0);
+  }
+
+  function protectExFactory(jobs, settings, now) {
+    const pool = jobs.slice().sort(byExFactory);
+    const missed = [];
+    for (let guard = 0; guard < pool.length + 4; guard++) {
+      const sch = scheduleSequence(pool, settings, now);
+      const lateIdx = sch.findIndex((j) => j.queueSlackDays != null && j.queueSlackDays < -0.02);
+      if (lateIdx < 0) return { printed: sch, missed };
+      let worst = 0;
+      for (let i = 1; i <= lateIdx; i++) {
+        const a = sch[i];
+        const b = sch[worst];
+        const aAlone = a.aloneSlackDays != null && a.aloneSlackDays < -0.02;
+        const bAlone = b.aloneSlackDays != null && b.aloneSlackDays < -0.02;
+        if (aAlone !== bAlone) {
+          if (aAlone) worst = i;
+          continue;
+        }
+        if ((a.machineHours || 0) > (b.machineHours || 0)) worst = i;
+      }
+      const [removed] = pool.splice(worst, 1);
+      missed.push(removed);
+      if (!pool.length) break;
+    }
+    return { printed: scheduleSequence(pool, settings, now), missed };
   }
 
   function orderForStrategy(jobs, settings) {
     const list = jobs.slice();
     if (settings.strategy === "slack") {
-      list.sort((a, b) => a.aloneSlackDays - b.aloneSlackDays || a.needBy - b.needBy);
-      return { printed: list, parked: [] };
+      list.sort((a, b) => a.aloneSlackDays - b.aloneSlackDays || byExFactory(a, b));
+      return { printed: list };
     }
     if (settings.strategy === "short") {
       list.sort((a, b) => {
         const aHot = a.aloneSlackDays <= 0 ? 0 : 1;
         const bHot = b.aloneSlackDays <= 0 ? 0 : 1;
         if (aHot !== bHot) return aHot - bHot;
-        if (aHot === 0) return a.needBy - b.needBy;
-        return a.machineHours - b.machineHours || a.needBy - b.needBy;
+        if (aHot === 0) return byExFactory(a, b);
+        return (a.machineHours || 0) - (b.machineHours || 0) || byExFactory(a, b);
       });
-      return { printed: list, parked: [] };
+      return { printed: list };
     }
     if (settings.strategy === "edd") {
-      list.sort(byNeed);
-      return { printed: list, parked: [] };
+      list.sort(byExFactory);
+      return { printed: list };
     }
     if (settings.strategy === "heavy") {
-      list.sort((a, b) => (b.machineHours || 0) - (a.machineHours || 0) || (a.needBy || 0) - (b.needBy || 0));
-      return { printed: list, parked: [] };
+      list.sort((a, b) => (b.machineHours || 0) - (a.machineHours || 0) || byExFactory(a, b));
+      return { printed: list };
     }
     return null;
   }
@@ -266,7 +299,8 @@
     const machineHours = (load.seconds / 3600) * (1 + settings.scrap);
     const capacityDays = capacityDaysFor(machineHours, load.longest || 0, settings);
     const aloneFinish = addCapacity(now, capacityDays, settings.weekends);
-    const aloneSlackDays = job.needBy ? (job.needBy.getTime() - aloneFinish) / 86400000 : null;
+    const due = dueMs(job);
+    const aloneSlackDays = due != null ? (due - aloneFinish) / 86400000 : null;
     return {
       ...job,
       machineHours,
@@ -295,7 +329,8 @@
       const serialHours = (part.runtimeSec || 0) / 3600;
       const capDays = capacityDaysFor(hours, serialHours, settings);
       const finish = addCapacity(start, capDays, settings.weekends);
-      const slack = job.needBy ? (job.needBy.getTime() - finish) / 86400000 : null;
+      const due = dueMs(job);
+      const slack = due != null ? (due - finish) / 86400000 : null;
       const share = houseHours > 0 && hours > 0 ? hours / houseHours : 0;
       let band = "ok";
       if (part.barred) band = "barred";
@@ -355,6 +390,7 @@
   }
 
   function bandForSlack(slack, tightDays) {
+    if (slack == null || !Number.isFinite(slack)) return "ok";
     if (slack < -0.02) return "late";
     if (slack < tightDays) return "tight";
     return "ok";
@@ -443,7 +479,7 @@
       if (!jobsByDay.has(key)) jobsByDay.set(key, []);
       jobsByDay.get(key).push(packCalJobEx(job, settings));
     };
-    (lists.printed || []).forEach((job) => {
+    (lists.printed || []).concat(lists.missed || []).forEach((job) => {
       addHours(job);
       addTickEx(job);
     });
@@ -492,7 +528,7 @@
     return {
       days,
       headline: calendarHeadline(days),
-      caption: "Cell tint = cumulative farm load by prints-needed-by. Dots = ex-factory ship dates; colour = job slack (miss / tight / ok).",
+      caption: "Cell tint = cumulative farm load by prints-needed-by. Dots = one per job shipping that day; grey / amber / red = ok / tight / miss vs ex-factory.",
     };
   }
 
@@ -572,14 +608,15 @@
     barred.sort((a, b) => (a.needBy || 0) - (b.needBy || 0) || String(a.name).localeCompare(String(b.name)));
 
     let printed;
+    let missed = [];
     if (settings.strategy === "dates") {
-      const pool = active.slice().sort(byNeed);
-      printed = scheduleSequence(pool, settings, now);
+      const saved = protectExFactory(active, settings, now);
+      printed = saved.printed;
+      missed = saved.missed;
     } else {
       const ordered = orderForStrategy(active, settings);
       printed = scheduleSequence(ordered.printed, settings, now);
     }
-    const parked = [];
 
     printed = printed.map((job, index) => attachParts({
       ...job,
@@ -587,9 +624,28 @@
       band: bandForSlack(job.queueSlackDays, settings.tightDays),
     }, settings, now));
 
+    missed = missed.map((job) => {
+      const finish = addCapacity(now, job.capacityDays, settings.weekends);
+      const due = dueMs(job);
+      const slack = due != null ? (due - finish) / 86400000 : job.aloneSlackDays;
+      const aloneLate = job.aloneSlackDays != null && job.aloneSlackDays < -0.02;
+      return attachParts({
+        ...job,
+        start: now,
+        finish,
+        queueSlackDays: slack,
+        order: null,
+        band: "late",
+        missReason: aloneLate
+          ? "Needs more farm time than remains before ex-factory, even if it started now."
+          : "Keeping this in date order would push other jobs past ex-factory. OS, bar, or accept it late so the rest can still ship.",
+      }, settings, now);
+    });
+    const parked = [];
+
     held = held.map((job) => attachParts({ ...job, band: "held" }, settings, now));
 
-    const considered = printed;
+    const considered = printed.concat(missed);
     const horizons = [7, 14, 30].map((days) => {
       const until = now + days * 86400000;
       const due = considered.filter((j) => j.needBy && j.needBy.getTime() <= until);
@@ -606,7 +662,7 @@
       }
     }
 
-    const late = printed.filter((j) => j.band === "late");
+    const late = missed.concat(printed.filter((j) => j.band === "late"));
     const tight = printed.filter((j) => j.band === "tight");
     const firstPrinted = printed[0] || null;
     const soonestBlind = blind[0] || null;
@@ -621,6 +677,7 @@
       now,
       printed,
       parked,
+      missed,
       blind,
       held,
       nodate,
@@ -635,7 +692,7 @@
       heroKind,
       machineHours: considered.reduce((sum, j) => sum + j.machineHours, 0),
       partsLeft: prepared.reduce((sum, j) => sum + (j.partsLeft || 0), 0),
-      calendar: buildFarmCalendar({ printed, blind, held, nodate, outsourced, barred }, settings, now),
+      calendar: buildFarmCalendar({ printed, missed, blind, held, nodate, outsourced, barred }, settings, now),
     };
   }
 
@@ -1286,6 +1343,7 @@
     };
     (plan.outsourced || []).forEach(add);
     (plan.printed || []).forEach(add);
+    (plan.missed || []).forEach(add);
     (plan.blind || []).forEach(add);
     (plan.held || []).forEach(add);
     (plan.nodate || []).forEach(add);
@@ -1310,6 +1368,7 @@
     };
     (plan.barred || []).forEach(add);
     (plan.printed || []).forEach(add);
+    (plan.missed || []).forEach(add);
     (plan.blind || []).forEach(add);
     (plan.held || []).forEach(add);
     (plan.nodate || []).forEach(add);
@@ -1653,7 +1712,7 @@
 
   function applyInline(jobs, plan) {
     const byId = new Map();
-    plan.printed.concat(plan.blind, plan.held, plan.nodate, plan.outsourced || [], plan.barred || [], plan.done).forEach((job) => byId.set(job.id, job));
+    plan.printed.concat(plan.missed || [], plan.blind, plan.held, plan.nodate, plan.outsourced || [], plan.barred || [], plan.done).forEach((job) => byId.set(job.id, job));
     rowById.clear();
     document.querySelectorAll("tr[data-bosq-id]").forEach((row) => {
       if (!jobs.some((job) => job.row === row)) clearInline(row);
@@ -1742,6 +1801,12 @@
         detail: "Still in pre-production, so it is not taking a printer ahead of released work.",
       };
     }
+    if (job.missReason) {
+      return {
+        label: `miss · ${formatSpan(job.capacityDays)} of the farm`,
+        detail: job.missReason,
+      };
+    }
     if (job.band === "outsourced") {
       return {
         label: job.outQty ? `outsourced · ${job.outQty} pts` : "outsourced",
@@ -1757,7 +1822,7 @@
     const rank = job.order ? `#${job.order}` : "·";
     return {
       label: `${rank} · ${formatSpan(job.capacityDays)} on farm · ${formatSlack(job.queueSlackDays)}`,
-      detail: `${job.workticket}. Board time is one printer (${formatClock(job.usedSeconds)}). On ${settings.machines} printers at ${settings.hoursPerDay}h a day this is about ${formatSpan(job.capacityDays)}, including a ${Math.round(settings.scrap * 100)}% reprint allowance. Prints needed by ${formatDay(job.needBy)}. ${formatSlack(job.queueSlackDays)} once the jobs ahead of it are done.`,
+      detail: `${job.workticket}. Board time is one printer (${formatClock(job.usedSeconds)}). On ${settings.machines} printers at ${settings.hoursPerDay}h a day this is about ${formatSpan(job.capacityDays)}, including a ${Math.round(settings.scrap * 100)}% reprint allowance. Ex-factory ${formatDay(job.exFactory)} (prints needed by ${formatDay(job.needBy)}). ${formatSlack(job.queueSlackDays)} vs ex-factory once the jobs ahead of it are done.`,
     };
   }
 
@@ -1821,7 +1886,7 @@
       '      <button type="button" data-act="import-data" title="Restore from a previous export">Import saved data</button>',
       '      <button type="button" data-act="reset">Reset settings</button>',
       "    </div>",
-      '    <p class="bosq-fine">Time Left on the board is one printer running nonstop. Ex factory is when the unit leaves, so prints are pulled forward by the buffer above. Settings and OS/Bar marks are saved in this browser (and a session copy if local storage is cleared). Use Export / Import to move them to another PC or profile. They never write back to BOS. Expand a job card to see which SKUs to print first.</p>',
+      '    <p class="bosq-fine">Time Left on the board is one printer running nonstop. Miss and Tight are versus ex-factory (when the unit must leave). Buffer days only pull prints-needed-by earlier for the calendar load. Save dates queues in date order and takes blockers off the farm clock (Will miss) so the rest can still ship — OS or bar those, or accept them late. Expand a job card to see which SKUs to print first. Settings never write back to BOS.</p>',
       "  </details>",
       "</div>",
       '<div class="bosq-resize bosq-resize-w" title="Drag to resize width" aria-hidden="true"></div>',
@@ -1922,11 +1987,11 @@
   ];
 
   const strategyHints = {
-    dates: "Orders by prints-needed-by date (ex-factory minus buffer), then one shared farm timeline. Miss/Tight use spare days to that deadline for each job in order.",
-    edd: "Same as Dates here: strict prints-needed-by order on the shared farm clock.",
-    slack: "Puts the job with the least spare time (if it were printed alone today) first — good for finding what is already breathing on the deadline.",
-    short: "Clears shorter in-house jobs first (when they are not already missing). Still keeps jobs that would miss anyway near the front.",
-    heavy: "Puts the heaviest total in-house printer load first — good when you want to see the big consumers before smaller work.",
+    dates: "Default. Date order on one farm clock, scored to ex-factory. Jobs that would make others miss are pulled into Will miss (OS / bar / accept late) so the rest still ship.",
+    edd: "Strict ex-factory order with every job still on the clock — later jobs wait for earlier ones. Use this to see the raw pile-up; it will look worse than Save dates.",
+    slack: "Puts the job with the least spare time (if it started alone today vs ex-factory) first.",
+    short: "Clears shorter in-house jobs first (when they are not already missing vs ex-factory). Still keeps already-late jobs near the front.",
+    heavy: "Puts the heaviest in-house printer load first.",
   };
 
   function renderSortChips(container) {
@@ -2262,7 +2327,7 @@
       ].join("");
     }
     return [
-      `<div class="bosq-hero-kicker">Start · #${job.order}</div>`,
+      `<div class="bosq-hero-kicker">${job.order ? `Start · #${job.order}` : "Start"}</div>`,
       `<div class="bosq-hero-name">${esc(job.name)}</div>`,
       `<div class="bosq-hero-meta">${esc(formatDay(job.exFactory))} · ${esc(formatSpan(job.capacityDays))} · ${esc(formatSlack(job.queueSlackDays))}</div>`,
     ].join("");
@@ -2277,8 +2342,8 @@
       ["barred", jobsWithBar(plan).length, "Bar"],
     ];
     const statTitles = {
-      late: "Would finish after prints-needed-by (ex-factory minus buffer) in the current simulated queue.",
-      tight: `Would finish within ${settings.tightDays} spare day(s) of that deadline in the current queue (same clock as the list).`,
+      late: "Will not be done by ex-factory in the current plan. Save dates pulls these off the farm clock so remaining jobs can still ship.",
+      tight: `Would finish within ${settings.tightDays} spare day(s) of ex-factory in the current print order.`,
       blind: "Open work missing runtime or ex-factory date.",
       outsourced: "Jobs with at least one SKU marked outsourced (off the farm clock).",
       barred: "Jobs with at least one SKU marked barred (off the farm clock).",
@@ -2381,11 +2446,13 @@
     }
     const sections = [];
     const blind = sortJobsForListView(plan.blind.concat(plan.nodate).filter(lensVisible));
+    const missed = sortJobsForListView((plan.missed || []).filter(lensVisible));
     const printed = sortJobsForListView(plan.printed.filter(lensVisible));
     const held = sortJobsForListView(plan.held.filter(lensVisible));
     const outsourced = sortJobsForListView((plan.outsourced || []).filter(lensVisible));
     const barredJobs = sortJobsForListView((plan.barred || []).filter(lensVisible));
     if (blind.length) sections.push(section("No runtime", blind, "Open parts, 0m left"));
+    if (missed.length) sections.push(section("Will miss", missed, "Won't make ex-factory on this plan — OS, bar, or accept late"));
     if (printed.length) sections.push(section("Print order", printed, strategyBlurb()));
     if (held.length) sections.push(section("Held", held, "Pre-production"));
     if (outsourced.length) sections.push(section("Outsourced", outsourced, "Local marks · off farm"));
@@ -2401,7 +2468,7 @@
     if (settings.strategy === "slack") return "Least spare first";
     if (settings.strategy === "short") return "Short jobs first";
     if (settings.strategy === "heavy") return "Heavy jobs first";
-    return "Dates order on farm";
+    return "Date order · protect ship dates";
   }
 
   function sortListNote() {
@@ -2537,7 +2604,7 @@
 
   function fingerprintOf(plan) {
     const pack = (job) => [job.id, job.band, job.order, Math.round((job.queueSlackDays || 0) * 10), job.partCue, job.outQty, expandedIds.has(job.id) ? 1 : 0].join(":");
-    return [plan.tab, lens, settings.sortView || "plan", settings.dimOk, JSON.stringify(outsourceMarks), JSON.stringify(barredMarks), plan.printed.map(pack).join(","), plan.blind.map(pack).join(","), plan.held.map(pack).join(","), (plan.outsourced || []).map(pack).join(","), (plan.barred || []).map(pack).join(","), jobsWithOs(plan).map(pack).join(","), jobsWithBar(plan).map(pack).join(",")].join("~");
+    return [plan.tab, lens, settings.sortView || "plan", settings.dimOk, JSON.stringify(outsourceMarks), JSON.stringify(barredMarks), plan.printed.map(pack).join(","), (plan.missed || []).map(pack).join(","), plan.blind.map(pack).join(","), plan.held.map(pack).join(","), (plan.outsourced || []).map(pack).join(","), (plan.barred || []).map(pack).join(","), jobsWithOs(plan).map(pack).join(","), jobsWithBar(plan).map(pack).join(",")].join("~");
   }
 
   function onPanelClick(event) {
@@ -2681,6 +2748,11 @@
     if (plan.blind.length) {
       lines.push("No runtime:");
       plan.blind.forEach((job) => lines.push(`- ${job.workticket} · ships ${formatDay(job.exFactory)} · ${job.partsLeft} parts · ${job.name}`));
+      lines.push("");
+    }
+    if ((plan.missed || []).length) {
+      lines.push("Will miss:");
+      plan.missed.forEach((job) => lines.push(`- ${job.workticket} · ships ${formatDay(job.exFactory)} · ${formatSpan(job.capacityDays)} of the farm · ${job.name}`));
       lines.push("");
     }
     if ((plan.outsourced || []).length) {
