@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.11
+// @version      1.3.12
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       WCP Print Queue
 // @license      MIT
@@ -2625,7 +2625,8 @@
   setInterval(() => { if (onBoard()) scheduleScan(); }, 4000);
 
   const CSS = `
-    html.bosq-is-docked, html.bosq-is-docked body, html.bosq-is-docked #root, html.bosq-is-docked .App {
+    /* Pad only <html>: padding on body + #root + .App stacked and crushed the main layout (~4× panel width). */
+    html.bosq-is-docked {
       padding-right: var(--bosq-dock-pad, 0px) !important;
       box-sizing: border-box;
     }
