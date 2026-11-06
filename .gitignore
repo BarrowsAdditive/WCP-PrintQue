@@ -1,5 +1,7 @@
-Barrows OS Additive Manufacturing tab .html
-Barrows OS Additive Manufacturing tab _files/
+# Local HTML test exports (keep out of repo)
+*_tab.html
+*_tab_files/
+
 *.zip
 .DS_Store
 Thumbs.db
