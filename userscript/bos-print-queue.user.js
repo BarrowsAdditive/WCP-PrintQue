@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.20
+// @version      1.3.21
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       WCP Print Queue
 // @license      MIT
@@ -1822,7 +1822,7 @@
     const rank = job.order ? `#${job.order}` : "·";
     return {
       label: `${rank} · ${formatSpan(job.capacityDays)} on farm · ${formatSlack(job.queueSlackDays)}`,
-      detail: `${job.workticket}. Board time is one printer (${formatClock(job.usedSeconds)}). On ${settings.machines} printers at ${settings.hoursPerDay}h a day this is about ${formatSpan(job.capacityDays)}, including a ${Math.round(settings.scrap * 100)}% reprint allowance. Ex-factory ${formatDay(job.exFactory)} (prints needed by ${formatDay(job.needBy)}). ${formatSlack(job.queueSlackDays)} vs ex-factory once the jobs ahead of it are done.`,
+      detail: `${job.workticket}. Board time is one printer (${formatClock(job.usedSeconds)}). At ${settings.machines} printers × ${settings.hoursPerDay} avg print hours a working day this is about ${formatSpan(job.capacityDays)}, including a ${Math.round(settings.scrap * 100)}% reprint allowance. Ex-factory ${formatDay(job.exFactory)} (prints needed by ${formatDay(job.needBy)}). ${formatSlack(job.queueSlackDays)} vs ex-factory once the jobs ahead of it are done.`,
     };
   }
 
@@ -1871,13 +1871,20 @@
       "    <summary>Farm settings</summary>",
       '    <div class="bosq-grid">',
       field("Printers", "machines", "1", "80", "1"),
-      field("Hours each runs", "hoursPerDay", "1", "24", "1"),
+      field(
+        "Avg print hrs / machine / day",
+        "hoursPerDay",
+        "0.5",
+        "24",
+        "0.5",
+        "Typical print hours you actually get from one machine on a working day. Farm capacity = printers × this, used with ex-factory for Miss / Tight."
+      ),
       field("Days before ex factory", "bufferDays", "0", "30", "1"),
       field("Reprint allowance %", "scrapPct", "0", "40", "1"),
       field("Tight if spare under (days)", "tightDays", "0", "14", "1"),
       field("Gap from board (px)", "dockGap", "0", "80", "1"),
       "    </div>",
-      check("weekends", "Printers run Saturday and Sunday"),
+      check("weekends", "Working days include Saturday and Sunday"),
       check("holdPre", "Hold pre-production off the printers"),
       check("dimOk", "Fade rows that have spare time"),
       '    <div class="bosq-actions">',
@@ -1886,7 +1893,7 @@
       '      <button type="button" data-act="import-data" title="Restore from a previous export">Import saved data</button>',
       '      <button type="button" data-act="reset">Reset settings</button>',
       "    </div>",
-      '    <p class="bosq-fine">Time Left on the board is one printer running nonstop. Miss and Tight are versus ex-factory (when the unit must leave). Buffer days only pull prints-needed-by earlier for the calendar load. Save dates queues in date order and takes blockers off the farm clock (Will miss) so the rest can still ship — OS or bar those, or accept them late. Expand a job card to see which SKUs to print first. Settings never write back to BOS.</p>',
+      '    <p class="bosq-fine">Time Left on the board is one printer running nonstop. Avg print hours is typical output per machine on a working day — farm capacity is printers × that average. Miss and Tight compare that clock to ex-factory. Buffer days only pull prints-needed-by earlier for the calendar load. Save dates queues in date order and takes blockers off the farm clock (Will miss) so the rest can still ship. Expand a job card to see which SKUs to print first. Settings never write back to BOS.</p>',
       "  </details>",
       "</div>",
       '<div class="bosq-resize bosq-resize-w" title="Drag to resize width" aria-hidden="true"></div>',
@@ -1965,8 +1972,9 @@
     window.addEventListener("resize", place);
   }
 
-  function field(label, key, min, max, step) {
-    return `<label>${label}<input data-setting="${key}" type="number" min="${min}" max="${max}" step="${step}"></label>`;
+  function field(label, key, min, max, step, title) {
+    const tip = title ? ` title="${esc(title)}"` : "";
+    return `<label${tip}>${label}<input data-setting="${key}" type="number" min="${min}" max="${max}" step="${step}"></label>`;
   }
 
   function check(key, label) {
@@ -2028,9 +2036,11 @@
     } else if (key === "scrapPct") {
       saveSettings({ scrap: clamp(Number(input.value) / 100, 0, 0.4) });
     } else {
-      const limits = { machines: [1, 80], hoursPerDay: [1, 24], bufferDays: [0, 30], tightDays: [0, 14], dockGap: [0, 80] };
+      const limits = { machines: [1, 80], hoursPerDay: [0.5, 24], bufferDays: [0, 30], tightDays: [0, 14], dockGap: [0, 80] };
       const [min, max] = limits[key] || [0, 999];
-      const patch = { [key]: clamp(Number(input.value), min, max) };
+      let next = clamp(Number(input.value), min, max);
+      if (key === "hoursPerDay") next = Math.round(next * 10) / 10;
+      const patch = { [key]: next };
       if (key === "machines") patch.tuned = true;
       saveSettings(patch);
       input.value = key === "scrapPct" ? Math.round(settings.scrap * 100) : settings[key];
@@ -2742,7 +2752,7 @@
     const plan = currentPlan;
     const lines = [
       `Print queue · ${plan.tab}`,
-      `${new Date().toLocaleString()} · ${settings.machines} printers × ${settings.hoursPerDay}h · ${settings.bufferDays}d before ex factory · ${Math.round(settings.scrap * 100)}% reprint allowance`,
+      `${new Date().toLocaleString()} · ${settings.machines} printers × ${settings.hoursPerDay} avg print h/day · ${settings.bufferDays}d before ex factory · ${Math.round(settings.scrap * 100)}% reprint allowance`,
       "",
     ];
     if (plan.blind.length) {
