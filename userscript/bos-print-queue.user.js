@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOS Print Queue
 // @namespace    bos.print.queue
-// @version      1.3.15
+// @version      1.3.16
 // @description  Farm-aware print queue, jeopardy flags, and early warnings on the Work Centre Planning Board. Reads the board only — it never edits dates, runtimes, or planning status.
 // @author       WCP Print Queue
 // @license      MIT
@@ -397,6 +397,31 @@
     };
   }
 
+  function jobCalendarSlack(job) {
+    if (job.queueSlackDays != null && Number.isFinite(job.queueSlackDays)) return job.queueSlackDays;
+    if (job.aloneSlackDays != null && Number.isFinite(job.aloneSlackDays)) return job.aloneSlackDays;
+    return null;
+  }
+
+  function jobExFactoryStatus(job, tightDays) {
+    const slack = jobCalendarSlack(job);
+    if (slack == null || !Number.isFinite(slack)) return "ok";
+    if (slack < -0.02) return "late";
+    if (slack < tightDays) return "tight";
+    return "ok";
+  }
+
+  function packCalJobEx(job, settings) {
+    const status = jobExFactoryStatus(job, settings.tightDays);
+    return {
+      id: job.id,
+      name: job.name,
+      band: job.band,
+      machineHours: job.machineHours || 0,
+      status,
+    };
+  }
+
   function calendarHeadline(days) {
     const hot = days.filter((day) => day.band === "late" || day.band === "tight");
     if (!hot.length) return "Dates hold over the next 4 weeks";
@@ -430,17 +455,18 @@
       const key = dayKey(job.needBy.getTime());
       demandByDay.set(key, (demandByDay.get(key) || 0) + (job.machineHours || 0));
     };
-    const addTick = (job) => {
-      if (!job || !job.needBy) return;
-      const key = dayKey(job.needBy.getTime());
+    const addTickEx = (job) => {
+      if (!job || !job.exFactory) return;
+      const key = dayKey(job.exFactory.getTime());
       if (!jobsByDay.has(key)) jobsByDay.set(key, []);
-      jobsByDay.get(key).push(packCalJob(job));
+      jobsByDay.get(key).push(packCalJobEx(job, settings));
     };
     (lists.printed || []).concat(lists.parked || []).forEach((job) => {
       addHours(job);
-      addTick(job);
+      addTickEx(job);
     });
-    (lists.blind || []).concat(lists.held || []).forEach(addTick);
+    (lists.blind || []).concat(lists.held || [], lists.nodate || []).forEach(addTickEx);
+    (lists.outsourced || []).concat(lists.barred || []).forEach(addTickEx);
     const days = [];
     let cumDemand = 0;
     let cumCap = 0;
@@ -456,14 +482,13 @@
       const util = cumCap > 0 ? cumDemand / cumCap : (cumDemand > 0 ? 2 : 0);
       const band = util >= 1 ? "late" : util >= 0.85 ? "tight" : "ok";
       const jobs = (jobsByDay.get(key) || []).slice().sort((a, b) => {
-        const rank = { late: 0, parked: 1, tight: 2, blind: 3, held: 4, ok: 5 };
-        return (rank[a.band] ?? 9) - (rank[b.band] ?? 9) || b.machineHours - a.machineHours;
+        const sr = { late: 0, tight: 1, ok: 2 };
+        const da = sr[a.status] ?? 9;
+        const db = sr[b.status] ?? 9;
+        if (da !== db) return da - db;
+        return String(a.name).localeCompare(String(b.name));
       });
-      const dots = [];
-      if (jobs.some((job) => job.band === "late")) dots.push("late");
-      if (jobs.some((job) => job.band === "tight")) dots.push("tight");
-      if (jobs.some((job) => job.band === "parked")) dots.push("parked");
-      if (jobs.some((job) => job.band === "blind")) dots.push("blind");
+      const dots = jobs.map((j) => j.status);
       days.push({
         key,
         ms,
@@ -485,7 +510,7 @@
     return {
       days,
       headline: calendarHeadline(days),
-      caption: "Due dates vs farm hours. Not a printer booking.",
+      caption: "Cell tint = cumulative farm load by prints-needed-by. Dots = ex-factory ship dates; colour = job slack (miss / tight / ok).",
     };
   }
 
@@ -641,7 +666,7 @@
       heroKind,
       machineHours: considered.reduce((sum, j) => sum + j.machineHours, 0),
       partsLeft: prepared.reduce((sum, j) => sum + (j.partsLeft || 0), 0),
-      calendar: buildFarmCalendar({ printed, parked, blind, held }, settings, now),
+      calendar: buildFarmCalendar({ printed, parked, blind, held, nodate, outsourced, barred }, settings, now),
     };
   }
 
@@ -2319,10 +2344,10 @@
       const on = calendarDayKey === day.key;
       const title = [
         formatDay(new Date(day.ms)),
-        day.off ? "farm off" : `${Math.round(day.util * 100)}% of capacity by this date`,
-        day.jobs.length ? `${day.jobs.length} due` : "nothing due",
+        day.off ? "farm off" : `${Math.round(day.util * 100)}% cumulative load by prints-needed-by`,
+        day.jobs.length ? `${day.jobs.length} ex-factory` : "no ex-factory dates",
       ].join(" · ");
-      const dots = day.dots.map((band) => `<i data-dot="${esc(band)}"></i>`).join("");
+      const dots = day.dots.map((st) => `<i data-dot="${esc(st)}"></i>`).join("");
       return `<button type="button" class="bosq-cal-day${on ? " is-on" : ""}${day.today ? " is-today" : ""}${day.off ? " is-off" : ""}" data-cal-day="${esc(day.key)}" data-band="${esc(day.band)}" style="--u:${Math.min(1.2, day.util) / 1.2}" title="${esc(title)}" aria-pressed="${on ? "true" : "false"}" aria-label="${esc(title)}"><span>${day.date}</span><span class="bosq-cal-dots">${dots}</span></button>`;
     }).join("");
     const selected = cal.days.find((day) => day.key === calendarDayKey);
@@ -2331,10 +2356,12 @@
       const shown = selected.jobs.slice(0, 6);
       const extra = selected.jobs.length - shown.length;
       const utilPct = selected.cumCap > 0 ? Math.round(selected.util * 100) + "%" : "—";
-      const rows = shown.map((job) =>
-        `<button type="button" class="bosq-cal-job" data-cal-open="${esc(job.id)}" data-band="${esc(job.band)}"><span>${esc(job.name)}</span><span>${job.machineHours > 0 ? esc(formatClock(job.machineHours * 3600)) : esc(labelFor(job.band))}</span></button>`
-      ).join("");
-      sheet = `<div class="bosq-cal-sheet"><p>${esc(formatDay(new Date(selected.ms)))} · ${esc(utilPct)} by this date${selected.jobs.length ? " · " + selected.jobs.length + " due" : ""}</p>${rows || "<p>Nothing due this day.</p>"}${extra > 0 ? `<p>+${extra} more</p>` : ""}</div>`;
+      const rows = shown.map((job) => {
+        const st = job.status === "late" ? "Miss" : job.status === "tight" ? "Tight" : "Ok";
+        const right = job.machineHours > 0 ? formatClock(job.machineHours * 3600) : st;
+        return `<button type="button" class="bosq-cal-job" data-cal-open="${esc(job.id)}" data-band="${esc(job.band)}" data-status="${esc(job.status)}"><span>${esc(job.name)}</span><span>${esc(right)}</span></button>`;
+      }).join("");
+      sheet = `<div class="bosq-cal-sheet"><p>${esc(formatDay(new Date(selected.ms)))} · ${esc(utilPct)} cumulative by need-by${selected.jobs.length ? " · " + selected.jobs.length + " ex-factory" : ""}</p>${rows || "<p>No ex-factory dates this day.</p>"}${extra > 0 ? `<p>+${extra} more</p>` : ""}</div>`;
     }
     return [
       `<summary class="bosq-cal-sum">Farm calendar <span class="bosq-cal-hint">${esc(cal.headline)}</span></summary>`,
@@ -2427,7 +2454,8 @@
   }
 
   function cardHtml(job) {
-    const open = expandedIds.has(job.id);
+    const osBarLens = lens === "outsourced" || lens === "barred";
+    const open = osBarLens || expandedIds.has(job.id);
     const rank = job.order ? `#${job.order}` : labelFor(job.band);
     const qty = lens === "outsourced" || job.band === "outsourced"
       ? (job.outQty ? `${job.outQty} OS` : "OS")
@@ -2457,7 +2485,7 @@
         <div class="bosq-card-acts">
           <button type="button" class="bosq-os ${osOn ? "is-on" : ""}" data-os-job="${esc(job.id)}" title="${osOn ? "Unmark outsourced" : "Mark whole job outsourced"}">OS</button>
           <button type="button" class="bosq-bar-btn ${barOn ? "is-on" : ""}" data-bar-job="${esc(job.id)}" title="${barOn ? "Unbar job" : "Bar whole job (ignore on farm)"}">BAR</button>
-          <button type="button" class="bosq-more" data-expand="${esc(job.id)}" aria-expanded="${open ? "true" : "false"}" title="${open ? "Hide parts" : "Show which parts to print first"}">${open ? "–" : "+"}</button>
+          ${osBarLens ? "" : `<button type="button" class="bosq-more" data-expand="${esc(job.id)}" aria-expanded="${open ? "true" : "false"}" title="${open ? "Hide parts" : "Show which parts to print first"}">${open ? "–" : "+"}</button>`}
         </div>
       </div>
       ${open ? partsHtml(job) : ""}
@@ -2465,14 +2493,28 @@
   }
 
   function partsHtml(job) {
-    let queue = job.partQueue || [];
-    if (lens === "outsourced") queue = queue.filter((part) => part.outsourced);
-    if (lens === "barred") queue = queue.filter((part) => part.barred);
+    let queue = (job.partQueue && job.partQueue.length) ? job.partQueue.slice() : [];
+    if (lens === "outsourced") {
+      queue = queue.filter((part) => (part.left > 0) || part.outsourced);
+    } else if (lens === "barred") {
+      queue = queue.filter((part) => (part.left > 0) || part.barred);
+    }
+    if (!queue.length && (job.parts || []).length) {
+      queue = (job.parts || []).filter((part) => part.left > 0).map((part) => ({
+        ...part,
+        hours: (part.left * (part.runtimeSec || 0) / 3600) * (1 + settings.scrap),
+        band: part.barred ? "barred" : (part.outsourced ? "outsourced" : (!(part.runtimeSec > 0) ? "blind" : "ok")),
+        first: false,
+        order: null,
+      }));
+      if (lens === "outsourced") queue = queue.filter((part) => (part.left > 0) || part.outsourced);
+      if (lens === "barred") queue = queue.filter((part) => (part.left > 0) || part.barred);
+    }
     if (!queue.length) {
       const empty = lens === "outsourced"
-        ? "No OS SKUs loaded yet. Expand the row on the board."
+        ? "Expand the row on the board to load SKUs for this ticket."
         : lens === "barred"
-          ? "No barred SKUs loaded yet. Expand the row on the board."
+          ? "Expand the row on the board to load SKUs for this ticket."
           : "Expand this job on the board to see SKUs.";
       return `<div class="bosq-parts"><p class="bosq-parts-empty">${empty}</p></div>`;
     }
@@ -2922,12 +2964,11 @@
     .bosq-cal-day.is-off { opacity: .42; }
     .bosq-cal-day.is-today { outline: 1px solid #e7b15a; outline-offset: -1px; }
     .bosq-cal-day.is-on { border-color: rgba(231,177,90,.7); }
-    .bosq-cal-dots { display: flex; gap: 2px; min-height: 5px; }
-    .bosq-cal-dots i { width: 4px; height: 4px; border-radius: 99px; background: #6f6a62; }
+    .bosq-cal-dots { display: flex; flex-wrap: wrap; gap: 2px; justify-content: center; max-height: 14px; overflow: hidden; }
+    .bosq-cal-dots i { width: 5px; height: 5px; border-radius: 99px; flex-shrink: 0; }
+    .bosq-cal-dots [data-dot="ok"] { background: #78716c; }
     .bosq-cal-dots [data-dot="late"] { background: #ef4444; }
-    .bosq-cal-dots [data-dot="tight"] { background: #f97316; }
-    .bosq-cal-dots [data-dot="parked"] { background: #64748b; }
-    .bosq-cal-dots [data-dot="blind"] { background: #8b5cf6; }
+    .bosq-cal-dots [data-dot="tight"] { background: #f59e0b; }
     .bosq-cal-cap { margin: 5px 0 0; color: #8f8a82; font-size: 10px; }
     .bosq-cal-sheet { margin-top: 6px; padding: 6px 8px; border-radius: 8px; background: #1a1815; }
     .bosq-cal-sheet p { margin: 0 0 5px; color: #a39e94; font-size: 10px; }
@@ -2942,6 +2983,9 @@
     .bosq-cal-job[data-band="blind"] { box-shadow: inset 2px 0 0 #8b5cf6; }
     .bosq-cal-job[data-band="parked"] { box-shadow: inset 2px 0 0 #64748b; }
     .bosq-cal-job[data-band="held"] { box-shadow: inset 2px 0 0 #8a847b; }
+    .bosq-cal-job[data-status="ok"] { box-shadow: inset 2px 0 0 #78716c; }
+    .bosq-cal-job[data-status="tight"] { box-shadow: inset 2px 0 0 #f59e0b; }
+    .bosq-cal-job[data-status="late"] { box-shadow: inset 2px 0 0 #ef4444; }
     .bosq-cal-job span:last-child { color: #a39e94; flex-shrink: 0; }
     .bosq-sensitivity { min-height: 14px; margin: 0 0 6px; color: #a39e94; font-size: 10px; }
     .bosq-tools { display: grid; grid-template-columns: 1fr; gap: 5px; }
